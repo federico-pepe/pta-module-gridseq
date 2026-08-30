@@ -281,7 +281,7 @@ def handle_encoder(state, data):
         h_track_idx, h_t = e.track_at(hcol)
         if h_t is not None:
             param_name = eng.ENCODER_PARAMS[e.current_param if e.main_selected else idx]
-            if param_name not in ("pan (v2)", "mod (v2)") and not _skip_pitch(param_name, h_t):
+            if param_name not in ("pan (v2)",) and not _skip_pitch(param_name, h_t):
                 held_step = h_t["step_page"] * 8 + hrow
                 e.nudge_param(h_track_idx, held_step, param_name, delta)
         return
@@ -291,7 +291,7 @@ def handle_encoder(state, data):
         if t is None:
             return
         param_name = eng.ENCODER_PARAMS[e.current_param]
-        if param_name in ("pan (v2)", "mod (v2)") or _skip_pitch(param_name, t):
+        if param_name in ("pan (v2)",) or _skip_pitch(param_name, t):
             return
         e.nudge_param(track_idx, None, param_name, delta)
         return
@@ -300,7 +300,7 @@ def handle_encoder(state, data):
     if t is None:
         return
     param_name = eng.ENCODER_PARAMS[idx]
-    if param_name in ("pan (v2)", "mod (v2)") or _skip_pitch(param_name, t):
+    if param_name in ("pan (v2)",) or _skip_pitch(param_name, t):
         return
     e.nudge_param(e.selected_track, None, param_name, delta)
 

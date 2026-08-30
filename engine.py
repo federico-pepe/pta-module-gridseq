@@ -55,7 +55,7 @@ SCALE_NAMES = list(SCALES.keys())
 #     current_param, i.e. it picks *which* parameter all 8 are showing.
 # "pan" and "mod" are v2/v3 stubs: shown, but an encoder turn there does
 # nothing yet (per-track CC modulation lanes land in v2 — see the plan).
-ENCODER_PARAMS = ["velocity", "gate", "repeat", "probability", "offset", "pitch", "pan (v2)", "mod (v2)"]
+ENCODER_PARAMS = ["velocity", "gate", "repeat", "probability", "offset", "pitch", "pan (v2)", "mod"]
 
 # Palette indices (core/push3.Palette, see palette.json) used for track
 # colors, cycled across DEFAULT_TRACK_COUNT+ tracks. Restricted to the
@@ -77,6 +77,10 @@ def new_step():
         "offset": 0,       # micro-timing, -45..+45 percent of step duration
         "accent": False,
         "note": 0,         # semitone offset from track root, melodic tracks only
+        "mod": 0,          # 0-127, sent as send_cc(track's mod_cc) when this step fires.
+                           # v2 "simple" slice: locked to the note lane's own
+                           # length/division, not an independent lane — see
+                           # the plan's "Full: independent lane" v2.5/v3 note.
     }
 
 
@@ -88,6 +92,7 @@ def new_track(index):
         "base_note": 36 + index,   # spreads default drum notes across the low range
         "root": 60,
         "scale": "chromatic",
+        "mod_cc": 1,        # CC1 = mod wheel; fixed for v2's simple slice, not yet per-track configurable
         "div": DEFAULT_DIV,
         "muted": False,
         "solo": False,
@@ -325,7 +330,9 @@ class Engine:
             step["offset"] = max(-45, min(45, step["offset"] + delta))
         elif param == "pitch":
             step["note"] = max(-24, min(24, step["note"] + (1 if delta > 0 else -1 if delta < 0 else 0)))
-        # "pan (v2)" / "mod (v2)": intentionally no-op, stub pages only
+        elif param == "mod":
+            step["mod"] = max(0, min(127, step["mod"] + delta))
+        # "pan (v2)": intentionally no-op, stub page only
 
     # -- octave / transpose -----------------------------------------------------
 
@@ -414,6 +421,12 @@ class Engine:
         import random
         if random.randint(1, 100) > step["prob"]:
             return
+
+        if step["mod"] > 0:
+            # Once per step trigger, not once per ratchet repeat — this is
+            # the "simple" v2 slice: a step's mod value rides the same
+            # gate as its note, not an independently-timed lane.
+            self._send_cc(t["channel"], t["mod_cc"], step["mod"])
 
         note = t["base_note"] if t["kind"] == "drum" else self._scale_note(t, step["note"])
         vel = step["vel"] + (20 if step["accent"] else 0)

@@ -47,9 +47,13 @@ pads mean:
 **Track mode (a specific track selected — the default):**
 - The 8 columns are **parameters** of that one track: column 1 =
   Velocity, column 2 = Gate, column 3 = Repeat, column 4 = Probability,
-  column 5 = Offset, column 6 = Pitch, columns 7-8 = Pan/Mod (v2, not
-  implemented yet). Encoder *N* always edits column *N*'s parameter for
-  the selected track.
+  column 5 = Offset, column 6 = Pitch, column 7 = Pan (reserved, not
+  implemented yet — turning it does nothing), column 8 = **Mod**: a
+  0-127 value sent as a fixed MIDI CC (CC1, mod wheel) whenever that
+  step triggers. Mod rides the same step as the note — it isn't an
+  independent lane with its own length/timing (that's a bigger feature,
+  tracked in the README's roadmap). Encoder *N* always edits column *N*'s
+  parameter for the selected track.
 - All 8 parameters are visible and editable at once — no paging.
 
 **Main mode (press "Select (main)"):**
@@ -214,7 +218,9 @@ when the module closes (switching to another module, or quitting
 
 - Scale quantization (Scale is a label today, not a pitch filter)
 - Per-track pattern length control beyond the default 8 steps
-- Per-track CC modulation lanes ("pan (v2)"/"mod (v2)" encoder pages)
+- Pan (encoder column 7) is a reserved no-op
+- A full, independent mod lane (own length/division/CC, dedicated grid
+  editor) — Mod today rides the note step instead, see above
 - Pattern slots / song chaining (v3)
 
 See the project README for the full v1→v3 roadmap.

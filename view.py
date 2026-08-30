@@ -185,6 +185,7 @@ def _kind_div_flags(t):
 _PARAM_FIELD = {
     "velocity": "vel", "gate": "gate", "repeat": "repeat",
     "probability": "prob", "offset": "offset", "pitch": "note",
+    "mod": "mod",
 }
 
 

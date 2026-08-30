@@ -44,14 +44,27 @@ SCALES = {
 }
 SCALE_NAMES = list(SCALES.keys())
 
-# Encoder parameter pages, cycled by tapping any encoder. "pan" and "mod" are
-# v2/v3 stubs: shown, but an encoder turn on those pages does nothing yet
-# (per-track CC modulation lanes land in v2 — see the plan).
-PARAM_PAGES = ["velocity", "gate", "repeat", "probability", "offset", "pitch", "pan (v2)", "mod (v2)"]
+# The 8 parameters, in encoder order. Meaning of "encoder index N" depends
+# on Engine.main_selected:
+#   - a track is selected (main_selected False): encoder N always edits
+#     ENCODER_PARAMS[N] of that one track — a fixed, 1:1 mapping, all 8
+#     parameters live at once, no paging.
+#   - Main mode (main_selected True): all 8 encoders edit the *same*
+#     parameter, ENCODER_PARAMS[current_param], one encoder per track
+#     (encoder N -> the Nth visible track). The jog wheel scrolls
+#     current_param, i.e. it picks *which* parameter all 8 are showing.
+# "pan" and "mod" are v2/v3 stubs: shown, but an encoder turn there does
+# nothing yet (per-track CC modulation lanes land in v2 — see the plan).
+ENCODER_PARAMS = ["velocity", "gate", "repeat", "probability", "offset", "pitch", "pan (v2)", "mod (v2)"]
 
-# Palette indices (core/push3.Palette, see palette.json) used for track colors,
-# cycled across DEFAULT_TRACK_COUNT+ tracks.
-TRACK_COLORS = [11, 79, 61, 30, 100, 49, 90, 39, 69, 23, 10, 34, 77, 0, 120, 56]
+# Palette indices (core/push3.Palette, see palette.json) used for track
+# colors, cycled across DEFAULT_TRACK_COUNT+ tracks. Restricted to the
+# hardware's "Vivid" row (docs/push3-led-colors.md) so every track color
+# reads clearly on the small pad LEDs — no muddy/dark palette entries.
+# Yellow (7) is deliberately excluded: it's reserved for the pulsing
+# active-time-division indicator (see view.py), so a track's own color
+# never gets confused with that.
+TRACK_COLORS = [1, 9, 10, 13, 17, 21, 22, 25, 26]
 
 
 def new_step():
@@ -118,14 +131,15 @@ class Engine:
         self.selected_track = 0
 
         self.held_pad = None            # (col, row) of the currently-held pad, or None
-        self.param_page = 0             # index into PARAM_PAGES
+        self.main_selected = False      # True: the 8 columns are tracks, all showing one shared parameter
+        self.current_param = 0          # index into ENCODER_PARAMS; only meaningful in Main mode, set by the jog wheel
 
         self.last_ext_clock = None
         self.ext_synced_before = False
 
         self.mods = {
-            "select": False, "mute": False, "solo": False,
-            "note": False, "scale": False, "repeat": False, "accent": False,
+            "mute": False, "solo": False,
+            "scale": False, "repeat": False, "accent": False,
             "shift": False,
         }
 
@@ -184,6 +198,16 @@ class Engine:
         if 0 <= self.selected_track < len(self.tracks):
             return self.tracks[self.selected_track]
         return None
+
+    def toggle_main(self):
+        self.main_selected = not self.main_selected
+
+    def select_track(self, track_idx):
+        """Picking a specific track (Screen-bottom button or the jog wheel)
+        always leaves Main mode — Main is reached only via its own
+        "Select (main)" button."""
+        self.selected_track = track_idx
+        self.main_selected = False
 
     def any_solo(self):
         return any(t["solo"] for t in self.tracks)
@@ -244,6 +268,27 @@ class Engine:
             return
         t = self.tracks[track_idx]
         t["kind"] = "melodic" if t["kind"] == "drum" else "drum"
+
+    def add_track(self, duplicate_from=None):
+        """Appends a new track (up to MAX_TRACKS) — the only way a track
+        count grows past DEFAULT_TRACK_COUNT, wired to the "Duplicate"
+        button. Without this, Page Left/Right had nowhere to page *to*,
+        which is why paging looked broken before this existed."""
+        if len(self.tracks) >= MAX_TRACKS:
+            return False
+        idx = len(self.tracks)
+        t = new_track(idx)
+        if duplicate_from is not None and 0 <= duplicate_from < len(self.tracks):
+            src = self.tracks[duplicate_from]
+            t["kind"] = src["kind"]
+            t["channel"] = src["channel"]
+            t["div"] = src["div"]
+            t["root"] = src["root"]
+            t["scale"] = src["scale"]
+            t["length"] = src["length"]
+            t["steps"] = [dict(s) for s in src["steps"]]
+        self.tracks.append(t)
+        return True
 
     def cycle_scale(self, track_idx, forward=True):
         if track_idx is None:

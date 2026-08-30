@@ -28,6 +28,11 @@ go run ./cmd/pushapp -module gridseq
 
 Requires `python3` on PATH (stdlib only, no pip install).
 
+## Manual
+
+Full control mapping, LED legend, and known v1 limitations:
+[MANUAL.md](MANUAL.md).
+
 ## Status
 
 v1 (this repo, current state): step on/off, per-step velocity/gate/

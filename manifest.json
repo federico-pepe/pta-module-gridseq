@@ -1,0 +1,10 @@
+{
+  "id": "gridseq",
+  "name": "GridSeq",
+  "version": "0.1.0",
+  "description": "OXI ONE-inspired multitrack step sequencer for Push (columns = tracks)",
+  "author": "federico-pepe",
+  "needs_midi_out": true,
+  "needs_midi_in": true,
+  "exec": "python3 run.py"
+}

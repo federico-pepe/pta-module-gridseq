@@ -155,16 +155,6 @@ Notes from experience:
 - No shell `timeout` command on macOS by default — bound Python loops
   with `time.time()` deadlines instead of relying on it.
 
-## Commit identity
-
-This repo is public under the **federico-pepe** GitHub account (not
-`fpp-ableton`). Local git config in this repo (not global) is already
-set to `user.name = federico-pepe`,
-`user.email = 6317270+federico-pepe@users.noreply.github.com`. Never
-commit as `federico.pepe@ableton.com` or the `fpp-ableton` identity here
-— verify with `git log -1 --format='%an <%ae>'` if unsure, don't assume
-the global config is correct for this repo.
-
 ## Install / run (against a local `push-tethered-app` checkout)
 
 ```bash

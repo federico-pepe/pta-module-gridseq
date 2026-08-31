@@ -25,9 +25,16 @@ import base64
 import copy
 import json
 import sys
+import time
 
 import engine as eng
 import view
+
+# Persistence is temporarily disabled: every module start begins from a
+# fresh default pattern, and nothing is written to the host's store on
+# close. The store_get/store_set call sites are kept intact (just
+# unreached) so re-enabling this later is a one-line flip, not a rewrite.
+PERSIST_ENABLED = False
 
 
 def send(obj):
@@ -62,8 +69,22 @@ class State:
         self.last_pad_colors = None
         self.last_button_colors = None
         self.button_held = {}  # button name -> currently pressed, for momentary LED feedback
+        self.popup_title = None    # generic transient popup — see show_popup
+        self.popup_body = None
+        self.popup_until = 0.0     # time.monotonic() deadline; popup shows while now < this
         self._next_id = 1000
         self._pending = {}  # request id -> tag string, for responses we care about
+
+    POPUP_DURATION = 1.5  # seconds a popup stays up after show_popup
+
+    def show_popup(self, title, body=None):
+        """A transient on-screen popup for a button/knob whose effect
+        isn't otherwise visible (BPM after a Tempo turn, a track's kind
+        after Note toggles it, ...). `title` is the small top line,
+        `body` (optional) the bigger line below it — see view._popup_ops."""
+        self.popup_title = title
+        self.popup_body = body
+        self.popup_until = time.monotonic() + State.POPUP_DURATION
 
     def request(self, method, params, tag=None):
         self._next_id += 1
@@ -133,16 +154,22 @@ def handle_pad(state, data):
     track_idx, t = e.track_at(col)
     if t is None:
         return
-    step_idx = t["step_page"] * 8 + row
 
-    if e.mods["mute"]:
+    if e.mod_lane_active:
+        # Grid is borrowed: column = track's mod lane, row = value bucket
+        # at the current cursor step.
         snapshot_for_undo(state)
-        t["muted"] = not t["muted"]
+        e.set_mod_value(track_idx, row)
         return
-    if e.mods["solo"]:
-        snapshot_for_undo(state)
-        t["solo"] = not t["solo"]
-        return
+
+    # Row 7 (physical top) is the earliest step in the page, row 0
+    # (physical bottom) the latest — so the playhead visibly travels
+    # top-to-bottom as steps advance, not bottom-to-top.
+    step_idx = t["step_page"] * 8 + (7 - row)
+
+    # Mute/Solo + tap live on the Screen-bottom (track-select) buttons,
+    # not here — see handle_button — so a pad tap while either is held
+    # still just toggles the step, same as normal.
     if e.mods["accent"]:
         snapshot_for_undo(state)
         e.toggle_accent(track_idx, step_idx)
@@ -166,6 +193,7 @@ def handle_pad(state, data):
 
 
 SCREEN_BOTTOM = {"Screen bottom %d" % n: n - 1 for n in range(1, 9)}
+SCREEN_TOP = {"Screen top %d" % n: n - 1 for n in range(1, 9)}
 
 
 def handle_button(state, data):
@@ -180,7 +208,7 @@ def handle_button(state, data):
     # pad/encoder gesture, not on the button press itself
     mod_key = {
         "Mute": "mute", "Solo": "solo",
-        "Scale": "scale", "Repeat": "repeat", "Accent": "accent",
+        "Repeat": "repeat", "Accent": "accent",
         "Shift": "shift",
     }.get(name)
     if mod_key:
@@ -192,28 +220,46 @@ def handle_button(state, data):
 
     if name == "Play":
         e.toggle_play()
-    elif name == "Stop Clips":
-        e.stop()
-    elif name == "Note":
-        snapshot_for_undo(state)
-        e.toggle_kind(e.selected_track)
+    elif name == "Scale":
+        e.toggle_scale_mode()
     elif name == "Octave Up":
-        e.transpose_all_melodic(12)
+        e.transpose_all(12)
     elif name == "Octave Down":
-        e.transpose_all_melodic(-12)
+        e.transpose_all(-12)
     elif name == "Page Left":
         e.track_page = max(0, e.track_page - 8)
     elif name == "Page Right":
         if e.track_page + 8 < len(e.tracks):
             e.track_page += 8
-    elif name == "D-Pad left":
-        t = e.selected()
-        if t and t["step_page"] > 0:
-            t["step_page"] -= 1
-    elif name == "D-Pad right":
-        t = e.selected()
-        if t and (t["step_page"] + 1) * 8 < t["length"]:
-            t["step_page"] += 1
+    elif name == "D-Pad up":
+        # Up = backward in time (earlier steps) — rows scroll top-to-
+        # bottom as steps advance, so "up" naturally means "earlier",
+        # matching the playhead's own direction. Left/right are unused
+        # for this now (moved off them since time reads vertically here,
+        # not horizontally).
+        if e.mod_lane_active:
+            e.move_mod_cursor(-1)
+        elif e.mods["shift"]:
+            snapshot_for_undo(state)
+            t = e.selected()
+            if t:
+                e.set_length(e.selected_track, t["length"] - 8)
+        else:
+            t = e.selected()
+            if t and t["step_page"] > 0:
+                t["step_page"] -= 1
+    elif name == "D-Pad down":
+        if e.mod_lane_active:
+            e.move_mod_cursor(1)
+        elif e.mods["shift"]:
+            snapshot_for_undo(state)
+            t = e.selected()
+            if t:
+                e.set_length(e.selected_track, t["length"] + 8)
+        else:
+            t = e.selected()
+            if t and (t["step_page"] + 1) * 8 < t["length"]:
+                t["step_page"] += 1
     elif name == "Duplicate":
         snapshot_for_undo(state)
         e.add_track(duplicate_from=e.selected_track)
@@ -223,18 +269,43 @@ def handle_button(state, data):
             state.undo_snapshot = None
     elif name in eng.DIVISIONS:
         snapshot_for_undo(state)
-        e.set_division(e.selected_track, name)
+        if e.mod_lane_active:
+            e.set_mod_division(e.selected_track, name)
+        else:
+            e.set_division(e.selected_track, name)
     elif name == "Select (main)":
         e.toggle_main()
+    elif name in SCREEN_TOP:
+        # Entry-time gating only: opening from Track mode only works via
+        # column 8 (the one Mod status button actually on screen there —
+        # see view.draw's Track-mode loop), since 1-7 don't map to
+        # anything in that mode. Main mode, and once the overlay is
+        # already open, every column maps to "that column's track" —
+        # the overlay itself doesn't remember which mode opened it, so
+        # closing/switching has to work the same way regardless (press
+        # the currently-open track's own button to close it, any other
+        # to jump straight there — see Engine.open_mod_lane and its LED
+        # in view.button_colors, which highlights whichever one closes).
+        col = SCREEN_TOP[name]
+        if e.mod_lane_active or e.main_selected:
+            track_idx, t = e.track_at(col)
+            if t is not None:
+                e.open_mod_lane(track_idx)
+        elif col == 7:
+            e.open_mod_lane(e.selected_track)
     elif name in SCREEN_BOTTOM:
         col = SCREEN_BOTTOM[name]
         track_idx, t = e.track_at(col)
-        if t is not None:
+        if t is None:
+            pass
+        elif e.mods["mute"]:
+            snapshot_for_undo(state)
+            t["muted"] = not t["muted"]
+        elif e.mods["solo"]:
+            snapshot_for_undo(state)
+            t["solo"] = not t["solo"]
+        else:
             e.select_track(track_idx)
-
-
-def _skip_pitch(param_name, t):
-    return param_name == "pitch" and t["kind"] != "melodic"
 
 
 def handle_encoder(state, data):
@@ -259,30 +330,52 @@ def handle_encoder(state, data):
         if delta:
             bpm = e.doc["pattern"]["bpm"] + delta
             e.doc["pattern"]["bpm"] = max(eng.MIN_BPM, min(eng.MAX_BPM, bpm))
+            state.show_popup("TEMPO", str(e.doc["pattern"]["bpm"]))
+        return
+
+    if e.scale_mode_active:
+        # Scale mode is exclusive: only encoders 1 (Key) and 2 (Scale)
+        # do anything, both track-level (no per-step meaning, so a held
+        # pad is irrelevant here too — unlike the rest of Track mode).
+        if delta:
+            if idx == 0:
+                e.nudge_key(e.selected_track, delta)
+            elif idx == 1:
+                e.nudge_scale(e.selected_track, delta)
+        return
+
+    if e.mod_lane_active:
+        # Mod-lane mode is exclusive: it borrows the grid and D-Pad, and
+        # every encoder (including the jog wheel) is irrelevant while
+        # it's active — editing happens via pads (set_mod_value) instead.
         return
 
     if name == "Jog wheel turn":
         # Only scrolls anything in Main mode: which parameter all 8
-        # columns show and edit. Never touches track selection.
+        # columns show and edit. Never touches track selection. Clamps
+        # at either end of ENCODER_PARAMS instead of wrapping — same
+        # "stop at the ends" choice Key/Scale made, for the same reason
+        # (there's no meaningful "next parameter after Mod").
         if delta and e.main_selected:
             step = 1 if delta > 0 else -1
-            e.current_param = (e.current_param + step) % len(eng.ENCODER_PARAMS)
+            e.current_param = max(0, min(len(eng.ENCODER_PARAMS) - 1, e.current_param + step))
         return
 
     if idx is None or idx < 0 or delta == 0:
         return  # volume/jog-press not used in v1; nothing to do with a zero delta
 
-    if e.mods["scale"]:
-        e.cycle_scale(e.selected_track, forward=(delta > 0))
-        return
-
     if e.held_pad is not None:
+        # "channel" is track-level, not per-step — nothing for a held pad
+        # to target, so it's inert here even though it's editable with no
+        # pad held (below).
         hcol, hrow = e.held_pad
         h_track_idx, h_t = e.track_at(hcol)
         if h_t is not None:
             param_name = eng.ENCODER_PARAMS[e.current_param if e.main_selected else idx]
-            if param_name not in ("pan (v2)",) and not _skip_pitch(param_name, h_t):
-                held_step = h_t["step_page"] * 8 + hrow
+            if param_name not in eng.NOOP_PARAMS and param_name != "channel":
+                # Same row inversion as handle_pad's step_idx and
+                # pad_colors: row 7 (top) is the earliest step.
+                held_step = h_t["step_page"] * 8 + (7 - hrow)
                 e.nudge_param(h_track_idx, held_step, param_name, delta)
         return
 
@@ -291,7 +384,10 @@ def handle_encoder(state, data):
         if t is None:
             return
         param_name = eng.ENCODER_PARAMS[e.current_param]
-        if param_name in ("pan (v2)",) or _skip_pitch(param_name, t):
+        if param_name == "channel":
+            e.nudge_channel(track_idx, delta)
+            return
+        if param_name in eng.NOOP_PARAMS:
             return
         e.nudge_param(track_idx, None, param_name, delta)
         return
@@ -300,7 +396,10 @@ def handle_encoder(state, data):
     if t is None:
         return
     param_name = eng.ENCODER_PARAMS[idx]
-    if param_name in ("pan (v2)",) or _skip_pitch(param_name, t):
+    if param_name == "channel":
+        e.nudge_channel(e.selected_track, delta)
+        return
+    if param_name in eng.NOOP_PARAMS:
         return
     e.nudge_param(e.selected_track, None, param_name, delta)
 
@@ -329,6 +428,8 @@ def handle_response(state, env):
 
 
 def save_pattern(state):
+    if not PERSIST_ENABLED:
+        return
     state.request("store_set", {"doc": state.engine.to_doc()})
 
 
@@ -353,7 +454,8 @@ def main():
 
         if method == "init":
             respond(id_, {})
-            state.request("store_get", {}, tag="store_get")
+            if PERSIST_ENABLED:
+                state.request("store_get", {}, tag="store_get")
         elif method == "handle":
             kind = params.get("kind")
             data = params.get("data") or {}

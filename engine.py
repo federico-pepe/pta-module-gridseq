@@ -1,27 +1,25 @@
 """engine.py — GridSeq's sequencer model: tracks, steps, timing, trigger logic.
 
-No I/O here. Everything that touches stdin/stdout lives in run.py; everything
-that touches display pixels lives in view.py. This module only knows how to
-advance time and decide what to play.
+No I/O here. run.py handles stdin/stdout. view.py handles the display.
+This module only advances time and decides what to play.
 
-Design note (see the plan this module was built from): unlike
-push-tethered-app's modules/seq.go, which has one shared step index for a
-single lane set, every Track here can run its own time division, so each
-track keeps its own step position instead of one global counter.
+Design note: push-tethered-app's modules/seq.go uses one shared step
+index for all lanes. Here, each Track runs its own time division and
+keeps its own step position.
 """
 
 import time
 
-MAX_TRACKS = 16          # 2 pages of 8 columns; enough headroom without overbuilding
+MAX_TRACKS = 16          # 2 pages of 8 columns
 DEFAULT_TRACK_COUNT = 8
 DEFAULT_STEPS = 8
 MAX_STEPS = 64
 MIN_BPM, MAX_BPM, DEFAULT_BPM = 40, 240, 120
 TICKS_PER_QUARTER = 24   # MIDI clock standard, independent of tempo
-EXTERNAL_CLOCK_TIMEOUT = 2.0  # seconds; matches seq.go's externalClockTimeout
+EXTERNAL_CLOCK_TIMEOUT = 2.0  # seconds. Matches seq.go's externalClockTimeout.
 
-# Push's 8 "Scene 1/4".."Scene 1/32t" buttons, in beats-per-step, used
-# directly as the time-division picker for the selected track.
+# Push's 8 "Scene 1/4".."Scene 1/32t" buttons, in beats per step. This
+# is the time-division picker for the selected track.
 DIVISIONS = {
     "Scene 1/4": 1.0,
     "Scene 1/4t": 2.0 / 3.0,
@@ -34,57 +32,86 @@ DIVISIONS = {
 }
 DEFAULT_DIV = "Scene 1/16"
 
+# Semitone offsets from root (0-11). _quantize_to_scale quantizes to
+# these (nearest pitch class). Order here is the cycle order for
+# Engine.cycle_scale (the Scale knob): diatonic modes first, then
+# symmetric scales, pentatonic/blues, then the melodic-minor family. Not
+# alphabetical, so the knob groups related sounds together.
 SCALES = {
     "chromatic": list(range(12)),
     "major": [0, 2, 4, 5, 7, 9, 11],
     "minor": [0, 2, 3, 5, 7, 8, 10],
     "dorian": [0, 2, 3, 5, 7, 9, 10],
-    "pentatonic_major": [0, 2, 4, 7, 9],
-    "pentatonic_minor": [0, 3, 5, 7, 10],
+    "mixolydian": [0, 2, 4, 5, 7, 9, 10],
+    "lydian": [0, 2, 4, 6, 7, 9, 11],
+    "phrygian": [0, 1, 3, 5, 7, 8, 10],
+    "locrian": [0, 1, 3, 5, 6, 8, 10],
+    "whole_tone": [0, 2, 4, 6, 8, 10],
+    "half_whole_dim": [0, 1, 3, 4, 6, 7, 9, 10],
+    "whole_half_dim": [0, 2, 3, 5, 6, 8, 9, 11],
+    "minor_blues": [0, 3, 5, 6, 7, 10],
+    "minor_pentatonic": [0, 3, 5, 7, 10],
+    "major_pentatonic": [0, 2, 4, 7, 9],
+    "harmonic_minor": [0, 2, 3, 5, 7, 8, 11],
+    "harmonic_major": [0, 2, 4, 5, 7, 8, 11],
+    "dorian_sharp4": [0, 2, 3, 6, 7, 9, 10],
+    "phrygian_dominant": [0, 1, 4, 5, 7, 8, 10],
+    "melodic_minor": [0, 2, 3, 5, 7, 9, 11],
+    "lydian_augmented": [0, 2, 4, 6, 8, 9, 11],
+    "lydian_dominant": [0, 2, 4, 6, 7, 9, 10],
+    "super_locrian": [0, 1, 3, 4, 6, 8, 10],
 }
 SCALE_NAMES = list(SCALES.keys())
 
-# The 8 parameters, in encoder order. Meaning of "encoder index N" depends
-# on Engine.main_selected:
-#   - a track is selected (main_selected False): encoder N always edits
-#     ENCODER_PARAMS[N] of that one track — a fixed, 1:1 mapping, all 8
+# Display overrides for scale names whose title-cased, underscore-split
+# form reads wrong, for example "Dorian Sharp4" instead of "Dorian #4".
+# Anything not listed here falls back to that generic transform (see
+# view.py's scale-name display in draw()).
+SCALE_LABELS = {
+    "half_whole_dim": "Half-Whole Dim",
+    "whole_half_dim": "Whole-Half Dim",
+    "dorian_sharp4": "Dorian #4",
+}
+
+# The 8 parameters, in encoder order. "Encoder index N" means:
+#   - A track is selected (main_selected False): encoder N always edits
+#     ENCODER_PARAMS[N] of that track. Fixed 1:1 mapping, all 8
 #     parameters live at once, no paging.
 #   - Main mode (main_selected True): all 8 encoders edit the *same*
 #     parameter, ENCODER_PARAMS[current_param], one encoder per track
-#     (encoder N -> the Nth visible track). The jog wheel scrolls
-#     current_param, i.e. it picks *which* parameter all 8 are showing.
-# "channel" is track-level, not per-step (see set_channel) — turning it
-# with no pad held changes the track's MIDI channel; holding a pad has
-# nothing to target, so it's inert there (see NOOP_PARAMS' use in
-# run.py's held-pad branch specifically, not the general one). "mod
-# lane" is a status page only (shows the selected track's mod-lane
-# division) — actual mod-lane editing happens in the dedicated grid
-# overlay (see mod_lane_active below), not via this encoder; turning it
-# does nothing at all, held pad or not.
+#     (encoder N -> the Nth visible track). The jog wheel picks which
+#     parameter all 8 show, by scrolling current_param.
+# "channel" is track-level, not per-step (see set_channel). With no pad
+# held, turning it changes the track's MIDI channel. A held pad has
+# nothing to target, so it does nothing there (see NOOP_PARAMS in
+# run.py's held-pad branch). "mod lane" is a status page only: it shows
+# the track's mod-lane division. Actual mod-lane editing happens in the
+# grid overlay (mod_lane_active below), not via this encoder. Turning it
+# does nothing, held pad or not.
 ENCODER_PARAMS = ["velocity", "gate", "repeat", "probability", "offset", "pitch", "channel", "mod lane"]
 NOOP_PARAMS = ("mod lane",)
 
-# Bucket values (0-127) for the mod-lane bar-graph editor's 8 rows — row 0
-# (bottom, matches the note grid's row-0-is-bottom convention) is the
-# lowest bucket, row 7 the highest.
+# Bucket values (0-127) for the mod-lane bar-graph editor's 8 rows. Row 0
+# (bottom, same convention as the note grid) is the lowest bucket, row 7
+# the highest.
 MOD_BUCKETS = [round(i * 127 / 7) for i in range(8)]
 
-# Palette indices (core/push3.Palette, see palette.json) used for track
+# Palette indices (core/push3.Palette, see palette.json) for track
 # colors, cycled across DEFAULT_TRACK_COUNT+ tracks. Hand-picked on real
-# Push hardware (not a mechanical "Vivid row" slice) — order and set are
-# chosen for what reads clearly and stays distinct on the small pad LEDs,
-# so don't reorder/regenerate this list without re-testing on hardware.
-# Yellow (7) is included here on purpose: the active-time-division pulse
-# (DIV_ACTIVE_HI/LO in view.py) moved to green, so yellow no longer needs
-# to be reserved.
+# Push hardware for what reads clearly and stays distinct on the small
+# pad LEDs. Do not reorder or regenerate this list without re-testing on
+# hardware. Yellow (7) is included on purpose: the active-time-division
+# pulse (DIV_ACTIVE_HI/LO in view.py) moved to green, so yellow no longer
+# needs to stay reserved.
 TRACK_COLORS = [1, 2, 3, 4, 6, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 25]
 
-# New tracks step through TRACK_COLORS by this stride instead of 1-by-1:
-# adjacent entries in the hand-picked list can be close hues (e.g. indices
-# 0-3 are all red/orange family), so a straight walk gives neighboring
-# *tracks* similar colors too. 3 is coprime with len(TRACK_COLORS) (26 =
-# 2*13), so the walk still visits all 26 colors before repeating — every
-# track up to MAX_TRACKS (16) still gets a color no other track has.
+# New tracks step through TRACK_COLORS by this stride, not 1-by-1.
+# Adjacent entries in the hand-picked list can be close hues (for
+# example indices 0-3 are all red/orange). A straight walk gives
+# neighboring *tracks* similar colors too. 3 is coprime with
+# len(TRACK_COLORS) (26 = 2*13), so the walk still visits all 26 colors
+# before it repeats. Every track up to MAX_TRACKS (16) gets a color no
+# other track has.
 TRACK_COLOR_STEP = 3
 
 # The color-picker overlay (Shift + Screen-bottom, see Engine.enter_color_
@@ -130,7 +157,7 @@ def new_track(index):
         "channel": 1,
         "root": 60,
         "scale": "chromatic",
-        "mod_cc": 1,        # CC1 = mod wheel; fixed, not yet per-track configurable
+        "mod_cc": 1,        # CC1 = mod wheel. Fixed, not yet per-track configurable.
         "div": DEFAULT_DIV,
         "muted": False,
         "solo": False,
@@ -146,7 +173,7 @@ def new_track(index):
         "mod_length": DEFAULT_STEPS,
         "mod_div": DEFAULT_DIV,
         "mod_steps": [0 for _ in range(DEFAULT_STEPS)],
-        # runtime-only fields below; harmless to persist, ignored on load if stale
+        # Runtime-only fields below. Harmless to persist, ignored on load if stale.
         "_pos": 0.0,        # wall-clock track beat position at last resync
         "_current_step": -1,
         "_ext_acc": 0,      # external-clock tick accumulator for this track
@@ -185,7 +212,7 @@ class Engine:
 
         self.held_pad = None            # (col, row) of the currently-held pad, or None
         self.main_selected = False      # True: the 8 columns are tracks, all showing one shared parameter
-        self.current_param = 0          # index into ENCODER_PARAMS; only meaningful in Main mode, set by the jog wheel
+        self.current_param = 0          # index into ENCODER_PARAMS. Only meaningful in Main mode, set by the jog wheel.
 
         self.mod_lane_active = False    # True: grid is borrowed for the mod-lane bar-graph editor
         self.mod_cursor = 0             # which mod-lane step index the bar graph is showing/editing
@@ -352,13 +379,14 @@ class Engine:
             t["div"] = div_name
 
     def set_length(self, track_idx, new_length, floor=DEFAULT_STEPS):
-        """Grows/shrinks the track's step count. Growing appends fresh
-        steps; shrinking truncates (data on the dropped tail is lost, same
-        as load()'s existing clamp-to-length behavior). `floor` defaults to
-        DEFAULT_STEPS (8) for Shift + D-Pad up/down, which moves in whole
-        8-step pages and shouldn't leave a page with nothing to land on;
-        nudge_length (the Clip View length knob, 1-step resolution) passes
-        floor=1 instead, since a track can be as short as a single step."""
+        """Grows or shrinks the track's step count. Growing appends fresh
+        steps. Shrinking truncates the tail (this loses data, same as
+        load()'s existing clamp-to-length behavior). `floor` defaults to
+        DEFAULT_STEPS (8), for Shift + D-Pad up/down, which moves in
+        whole 8-step pages and must not leave a page with nothing to land
+        on. nudge_length (the Clip View length knob, 1-step resolution)
+        passes floor=1 instead, because a track can be as short as one
+        step."""
         if track_idx is None:
             return
         t = self.tracks[track_idx]
@@ -377,13 +405,13 @@ class Engine:
     # -- mod lane -----------------------------------------------------
 
     def open_mod_lane(self, track_idx):
-        """Wired to every "Screen top N" button: selects that column's
+        """Wired to every "Screen top N" button. Selects that column's
         track and opens the mod-lane overlay for it. A second press on
-        the button for the *same* already-open track closes the overlay
-        (mirrors a plain toggle); pressing a different track's button
-        while the overlay is open jumps straight to that track instead
-        of closing first — closing only happens by re-pressing the one
-        that's currently open."""
+        the button for the *same*, already-open track closes the overlay
+        (a plain toggle). Pressing a different track's button while the
+        overlay is open jumps straight to that track, instead of closing
+        first. Closing only happens by pressing the button of the track
+        that is currently open."""
         if self.mod_lane_active and self.selected_track == track_idx:
             self.mod_lane_active = False
         else:
@@ -454,15 +482,16 @@ class Engine:
             self._channel_accum += self.KNOB_ACCUM_THRESHOLD
 
     def enter_sequence(self, doc):
-        """Swaps in a whole different sequence — wired to the Set-button
-        browser's confirm gesture. `doc=None` means "New" (a fresh default
-        pattern); otherwise `doc` is a saved sequence's file contents, run
-        through the normal `load()` clamping. Unlike `load()` alone, this
-        also resets navigation/overlay state (track_page, selected_track,
-        which mode/overlay was open) — loading a totally different pattern
-        can leave any of those pointing past the new pattern's edges or
-        into a mode that no longer makes sense, and stops playback first so
-        the old pattern's notes don't hang."""
+        """Swaps in a whole different sequence. Wired to the Set-button
+        browser's confirm gesture. `doc=None` means "New" (a fresh
+        default pattern). Otherwise `doc` is a saved sequence's file
+        contents, run through the normal `load()` clamping. Unlike
+        `load()` alone, this also resets navigation and overlay state
+        (track_page, selected_track, which mode or overlay was open),
+        because loading a different pattern can leave any of those
+        pointing past the new pattern's edges, or in a mode that no
+        longer makes sense. It also stops playback first, so the old
+        pattern's notes do not hang."""
         self.stop()
         self.doc = default_doc()
         if doc is not None:
@@ -500,8 +529,8 @@ class Engine:
         return True
 
     def cycle_scale(self, track_idx, forward=True):
-        # Clamps, doesn't wrap: reaching either end of SCALE_NAMES just
-        # stops there — turning further the same way does nothing, only
+        # Clamps, does not wrap. At either end of SCALE_NAMES, it just
+        # stops. Turning further the same way does nothing. Only
         # reversing direction moves it again (cycle_key does the same).
         if track_idx is None:
             return
@@ -553,18 +582,18 @@ class Engine:
 
     def toggle_scale_mode(self):
         """Wired to the "Scale" button (a plain toggle now, not a hold).
-        Only enterable with a specific track selected — Scale mode shows
-        Key/Scale for *the* selected track, which doesn't mean anything
-        in Main mode (many tracks) or while the mod lane overlay (a
-        different track-scoped overlay) is open. Turning it off is
-        always allowed regardless of mode, same as the mod lane's own
-        toggle-closes-if-already-open behavior."""
+        Enterable only with a specific track selected. Scale mode shows
+        Key/Scale for *the* selected track, which means nothing in Main
+        mode (many tracks) or while the mod lane overlay (a different
+        track-scoped overlay) is open. Turning it off works in any mode,
+        the same as the mod lane's own toggle-closes-if-already-open
+        behavior."""
         if not self.scale_mode_active and (self.main_selected or self.mod_lane_active):
             return
         self.scale_mode_active = not self.scale_mode_active
         if self.scale_mode_active:
-            # Fresh accumulators on entry — a partial turn left over from
-            # several sessions ago shouldn't bias the very next tick.
+            # Fresh accumulators on entry. A partial turn left over from
+            # several sessions ago must not bias the very next tick.
             self._key_accum = 0
             self._scale_accum = 0
             self.length_view_active = False  # exclusive with Clip View's Length overlay
@@ -598,11 +627,11 @@ class Engine:
             self._length_accum += self.KNOB_ACCUM_THRESHOLD
 
     # Params where an accumulated turn is required per step, same
-    # technique (and threshold) as nudge_key/nudge_scale — a plain
+    # technique (and threshold) as nudge_key/nudge_scale. A plain
     # per-message delta felt too twitchy for these specifically.
     # Velocity/gate/probability are deliberately left at full,
-    # per-message sensitivity: they're 0-100/1-127-range continuous
-    # values where fast, fine adjustment is the point.
+    # per-message sensitivity. They are 0-100/1-127-range continuous
+    # values, where fast, fine adjustment is the point.
     THROTTLED_PARAMS = ("pitch", "offset", "repeat")
 
     def nudge_param(self, track_idx, step_idx, param, delta):
@@ -738,8 +767,9 @@ class Engine:
 
         synced = self.is_externally_synced()
         if synced:
-            # External clock path already advances steps in
-            # on_external_clock_byte; re-anchor so we don't jump on drop-out.
+            # The external clock path already advances steps in
+            # on_external_clock_byte. Re-anchor so playback does not
+            # jump on drop-out.
             self.play_start = now
             for t in self.tracks:
                 t["_pos"] = 0.0
@@ -840,8 +870,9 @@ class Engine:
     def _schedule_note(self, track_idx, note, vel, fire_at, off_at):
         t = self.tracks[track_idx]
         ch = t["channel"]
-        # fire immediately if due now-ish (draw-driven, no real scheduler thread);
-        # ratchet repeats beyond the first one fire on later ticks via pending list
+        # Fires immediately if due now-ish (draw-driven, no real scheduler
+        # thread). Ratchet repeats beyond the first one fire on later
+        # ticks, via the pending list.
         if fire_at <= time.monotonic() + 0.001:
             self._send_note(ch, note, vel)
             self.pending_offs.append((off_at, ch, note))

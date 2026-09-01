@@ -29,11 +29,12 @@ def color_by_index(idx):
 OFF = 0
 DIM = 79        # aquamarine-ish dim marker, used for "playhead only, step empty"
 PLAYHEAD_ON = 120  # bright white — playhead currently on an active step
-INAUDIBLE_STEP = 118  # "gray_mid" — an on step for a track that won't actually
-                       # sound right now (explicitly muted, or muted-by-solo
-                       # because some other track is soloed) — same grey used
-                       # for the bottom-strip label in this state, so pads and
-                       # the track label agree at a glance.
+INAUDIBLE_STEP = 118  # "gray_mid" — an on step for a track that does not
+                       # actually sound right now (explicitly muted, or
+                       # muted by solo because some other track is
+                       # soloed). Same grey as the bottom-strip label in
+                       # this state, so pads and the track label agree at
+                       # a glance.
 
 # Button LED indices — separate from pad LEDs because button-white is a
 # different palette entry than pad-white (see docs/protocol/led-output.md
@@ -101,12 +102,12 @@ BUTTON_CC = {
 
 def button_colors(state):
     """Returns {button_name: palette_index} for every button GridSeq
-    manages. Rules (per the design decision this was built from):
-    Play is white when paused, green when playing; every other managed
-    button is dim white when inactive, full white when active — "active"
-    meaning held for a momentary action, toggled on for a modifier, or
-    "currently in effect" for a status indicator (Undo, division picker,
-    track-select row)."""
+    manages. Rules (per the design decision this was built from): Play is
+    white when paused, and green when playing. Every other managed
+    button is dim white when inactive, and full white when active.
+    "Active" means held for a momentary action, toggled on for a
+    modifier, or "currently in effect" for a status indicator (Undo,
+    division picker, track-select row)."""
     e = state.engine
     held = state.button_held
     out = {}
@@ -193,15 +194,15 @@ def button_colors(state):
 
     out["Select (main)"] = BTN_FULL if e.main_selected else BTN_DIM
 
-    # Screen top N: off by default — these buttons only ever do one
-    # thing (open a Mod button's track's lane), so they only light when
-    # there's actually a Mod button on screen for them to sit above,
-    # using that Mod button's own track color rather than a generic
-    # dim/full (mirrors the Screen-bottom row's "off = no track owns
-    # this" choice rather than Select (main)'s toggle-style dim/full).
-    # Whichever one's mod lane is currently *open* overrides to bright
-    # red instead, signaling "click to exit" — same button, different
-    # job once you're inside the overlay it opens.
+    # Screen top N: off by default. These buttons only ever do one thing
+    # (open a Mod button's track's lane), so they light only when a Mod
+    # button is actually on screen for them to sit above, using that Mod
+    # button's own track color instead of a generic dim/full. This
+    # mirrors the Screen-bottom row's "off means no track owns this"
+    # choice, instead of Select (main)'s toggle-style dim/full.
+    # Whichever track's mod lane is currently *open* overrides to bright
+    # red instead, signaling "click to exit". Same button, different job,
+    # once you are inside the overlay it opens.
     for col in range(8):
         name = "Screen top %d" % (col + 1)
         idx, ct = e.track_at(col)
@@ -215,10 +216,10 @@ def button_colors(state):
         else:
             out[name] = t["color"] if (col == 7 and t is not None) else BTN_OFF
 
-    # Screen-bottom buttons are black by default; only the selected track's
-    # button lights, in that track's own color. All black while Main is
-    # active — no single button should look "the" selection during a
-    # broadcast edit.
+    # Screen-bottom buttons are black by default. Only the selected
+    # track's button lights, in that track's own color. All black while
+    # Main is active: no single button must look like "the" selection
+    # during a broadcast edit.
     for col in range(8):
         name = "Screen bottom %d" % (col + 1)
         idx, ct = e.track_at(col)
@@ -316,9 +317,9 @@ _PARAM_FIELD = {
 
 
 def _param_value(t, param_name):
-    """Just the number(s) — no "Vel"/"Gat"/... prefix. The parameter name
-    is already shown on the row above (see draw()), so repeating an
-    abbreviation next to the value would just be noise."""
+    """Just the number(s), with no "Vel"/"Gat"/... prefix. The parameter
+    name is already shown on the row above (see draw()), so an
+    abbreviation next to the value only adds noise."""
     field = _PARAM_FIELD[param_name]
     if not t["steps"]:
         return "-"
@@ -355,9 +356,10 @@ def _value_op(x, baseline, s, c):
 def _held_step(e):
     """(track_idx, step_idx) of the currently-held pad, translated
     through the same row inversion as everywhere else (row 7 = earliest
-    step) — or (None, None) if no pad is held, or the held pad is past
-    its track's length. Centralized here so draw()'s value display and
-    run.py's edit dispatch can't drift apart on what "the held step" means."""
+    step). Returns (None, None) if no pad is held, or the held pad is
+    past its track's length. Centralized here so draw()'s value display
+    and run.py's edit dispatch cannot drift apart on what "the held
+    step" means."""
     if e.held_pad is None:
         return None, None
     col, row = e.held_pad
@@ -372,15 +374,15 @@ def _held_step(e):
 
 def _param_display_value(t, param_name, held_step=None):
     """"channel" is a track-level scalar, not aggregated over steps like
-    _PARAM_FIELD's entries — show it directly, held pad or not (there's
-    no step for it to narrow down to). For every per-step parameter: with
-    a pad held, show that exact step's value (a single number is easy to
-    read and reason about); with nothing held, fall back to the
-    lo..hi range across every step (a compressed "shape" preview) — this
-    is the same "range narrows to an exact value while editing" pattern
+    _PARAM_FIELD's entries. Show it directly, held pad or not, because
+    there is no step for it to narrow down to. For every per-step
+    parameter: with a pad held, show that exact step's value (a single
+    number is easy to read). With nothing held, fall back to the lo..hi
+    range across every step (a compressed "shape" preview). This is the
+    same "range narrows to an exact value while editing" pattern
     _pitch_display_value uses for note names. Callers must special-case
-    "mod lane" themselves (see _mod_button_ops) rather than routing it
-    here, since it renders as a button, not a label+value pair."""
+    "mod lane" themselves (see _mod_button_ops), instead of routing it
+    here, because it renders as a button, not a label/value pair."""
     if param_name == "channel":
         return str(t["channel"])
     if param_name not in _PARAM_FIELD:
@@ -417,21 +419,22 @@ def _pitch_display_value(e, t, held_step=None):
     return _note_name(lo) if lo == hi else "%s..%s" % (_note_name(lo), _note_name(hi))
 
 
-CHAR_W = 7  # basicfont.Face7x13's fixed glyph advance at scale 1 (see internal/renderframe);
-            # width at scale N is CHAR_W * N — used to center text without real font metrics.
+CHAR_W = 7  # basicfont.Face7x13's fixed glyph advance at scale 1 (see internal/renderframe).
+            # Width at scale N is CHAR_W * N. Used to center text with no real font metrics.
 
 MOD_BUTTON_Y, MOD_BUTTON_H = 0, 18  # same footprint the removed header row used to occupy — no taller
 
 
 def _mod_button_ops(x, col_w, c):
-    """The "Mod" column's status page (Track/Main mode only — not the
-    mod-lane editor overlay itself) renders as a colored button tile
-    instead of a label+value pair: there's no single meaningful value to
-    show (a whole lane's worth of steps), and "n/a" was just noise. How
-    to actually visualize the lane here is still undecided — this is a
-    placeholder that at least doesn't waste the space or lie. The ">"
-    hints there's another page of settings behind it (the mod-lane
-    overlay, opened via the "Screen top N" button above this column)."""
+    """The "Mod" column's status page (Track/Main mode only, not the
+    mod-lane editor overlay itself) renders as a colored button tile,
+    instead of a label/value pair. There is no single meaningful value
+    to show, because a mod lane holds a whole lane's worth of steps, and
+    "n/a" was just noise. How to actually visualize the lane here is
+    still an open question. This tile is a placeholder that at least
+    does not waste the space or lie. The ">" hints at another page of
+    settings behind it, the mod-lane overlay, opened via the "Screen top
+    N" button above this column."""
     black = color("off")
     baseline = MOD_BUTTON_Y + 14
     return [
@@ -444,7 +447,7 @@ def _mod_button_ops(x, col_w, c):
 SEQ_LIST_X = 20
 SEQ_LIST_Y = 30
 SEQ_LIST_ROW_H = 20
-SEQ_LIST_VISIBLE = 6  # rows shown at once; the list scrolls to keep the cursor in view
+SEQ_LIST_VISIBLE = 6  # rows shown at once. The list scrolls to keep the cursor in view.
 SEQ_LIST_W = 400
 
 
@@ -505,7 +508,7 @@ def draw(state):
             key_name = NOTE_NAMES[t["root"] % 12]
             ops.append({"kind": "text", "params": {"x": 4, "baseline": PARAM_LABEL_BASELINE, "s": "Key", "c": c}})
             ops.append(_value_op(4, PARAM_VALUE_BASELINE, key_name, c))
-            scale_name = t["scale"].replace("_", " ").title()
+            scale_name = eng.SCALE_LABELS.get(t["scale"]) or t["scale"].replace("_", " ").title()
             ops.append({"kind": "text", "params": {"x": col_w + 4, "baseline": PARAM_LABEL_BASELINE, "s": "Scale", "c": c}})
             ops.append(_value_op(col_w + 4, PARAM_VALUE_BASELINE, scale_name, c))
     elif e.length_view_active:
@@ -518,10 +521,10 @@ def draw(state):
             ops.append({"kind": "text", "params": {"x": 4, "baseline": PARAM_LABEL_BASELINE, "s": "Length", "c": c}})
             ops.append(_value_op(4, PARAM_VALUE_BASELINE, str(t["length"]), c))
     elif e.mod_lane_active:
-        # Mod-lane mode: columns = tracks' mod lanes (same as always),
-        # label = that track's own mod division (independent per track),
-        # value = its mod value at the shared cursor step — "-" if that
-        # track's lane doesn't reach the cursor yet.
+        # Mod-lane mode: columns = tracks' mod lanes (same as always).
+        # Label = that track's own mod division (independent per track).
+        # Value = its mod value at the shared cursor step, or "-" if that
+        # track's lane does not reach the cursor yet.
         for col in range(8):
             idx, t = e.track_at(col)
             x = col * col_w
@@ -579,16 +582,16 @@ def draw(state):
             ops.append({"kind": "text", "params": {"x": x + 4, "baseline": PARAM_LABEL_BASELINE, "s": label, "c": c}})
             ops.append(_value_op(x + 4, PARAM_VALUE_BASELINE, value, c))
 
-    # Bottom strip: always tracks, regardless of the mode above — it
+    # Bottom strip: always tracks, regardless of the mode above. It
     # labels the physical "Screen bottom" buttons and pad-grid columns,
-    # which never change meaning. The selected track's label is a filled,
-    # colored block (a highlighted tab); every other track's is colored
-    # text on black; none are highlighted while Main mode is active (see
-    # item 1: those buttons are black unless selected). A track that
-    # won't actually sound right now
-    # (muted, or muted-by-solo) greys out here too, matching its pads —
-    # "muted" isn't just a pad-level fact, it should read at a glance
-    # from the label too.
+    # which never change meaning. The selected track's label is a
+    # filled, colored block (a highlighted tab). Every other track's
+    # label is colored text on black. No label is highlighted while Main
+    # mode is active (see item 1: those buttons are black unless
+    # selected). A track that does not actually sound right now (muted,
+    # or muted by solo) greys out here too, matching its pads. "Muted" is
+    # not just a pad-level fact. It must read at a glance from the label
+    # too.
     for col in range(8):
         idx, t = e.track_at(col)
         x = col * col_w
@@ -619,12 +622,12 @@ POPUP_PAD = 20  # horizontal padding either side of the widest line
 
 def _popup_ops(title, body):
     """A centered white popup box: `title` on a small top line, `body`
-    (optional) bigger below it — reused for every "button did something
-    that isn't otherwise visible" case (see State.show_popup), not just
-    the Tempo readout it started as. Box width fits the widest line
-    since a one-word title ("TEMPO") and a multi-word body ("Melodic
-    Sequencer") need very different widths; centering both text and box
-    uses CHAR_W since there's no real font-metrics API to query."""
+    (optional) bigger below it. Reused for every "button did something
+    that is not otherwise visible" case (see State.show_popup), not just
+    the Tempo readout it started as. Box width fits the widest line,
+    because a one-word title ("TEMPO") and a multi-word body ("Melodic
+    Sequencer") need very different widths. Centering both text and box
+    uses CHAR_W, because there is no real font-metrics API to query."""
     black = color("off")
     title_w = CHAR_W * len(title)
     body_w = CHAR_W * VALUE_SCALE * len(body) if body else 0

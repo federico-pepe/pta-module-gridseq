@@ -15,6 +15,14 @@ Guidance for Claude Code in this repository.
 > after its settled parts get folded into `README.md`/`MANUAL.md`. Don't
 > delete a plan file once a phase ships — update its "what shipped" /
 > "open" split instead.
+>
+> **Writing style:** `README.md`, `MANUAL.md`, and every comment/docstring
+> in `engine.py`/`run.py`/`view.py` follow Simplified Technical English
+> (pragmatic mode, via the `simple-english` skill): short sentences,
+> active voice, no contractions, no semicolons, and no `should`/`would`/
+> `could`/`however`/`therefore`. Keep code comments concise — STE cleans
+> up grammar, it does not license longer comments. Apply this to new
+> prose as you write it, rather than as a separate pass.
 
 ## Project
 

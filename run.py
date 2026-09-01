@@ -2,23 +2,25 @@
 """run.py — GridSeq protocol loop.
 
 Same envelope shape as every process module in this app (see
-push-tethered-app/examples/modules/hello-py's run.py docstring for the full
-wire format). This file only does I/O + event dispatch; the sequencer model
-lives in engine.py, the screen/pad-color rendering in view.py.
+push-tethered-app/examples/modules/hello-py's run.py docstring for the
+full wire format). This file only does I/O and event dispatch. The
+sequencer model lives in engine.py. The screen and pad-color rendering
+lives in view.py.
 
-Outgoing calls come in two shapes (see docs/architecture/process-modules.md's
-method table): pure notifications (set_pad, set_button, log — no id, no
-reply expected) and requests (send_cc, send_note, note_off, store_get,
-store_set — carry an id, host replies on its own line later). This module
-never blocks waiting for a reply; incoming response lines are matched
-against a small pending-request table and applied whenever they arrive.
+Outgoing calls come in two shapes (see
+docs/architecture/process-modules.md's method table): pure notifications
+(set_pad, set_button, log, with no id and no reply expected) and
+requests (send_cc, send_note, note_off, store_get, store_set, which
+carry an id and get a host reply on a later line). This module never
+blocks while it waits for a reply. Incoming response lines are matched
+against a small pending-request table, and applied whenever they arrive.
 
-Pad and button LEDs are relit once per "draw" call (diffed against the last
-frame, so an unchanged grid/button set costs nothing) rather than after
-every individual handler — draw is called continuously (30-60fps) by the
-host, so this is at most one frame of latency and it means every state
-change, wherever it happens, is guaranteed to reach the LEDs without having
-to remember to call relight_* at every call site.
+Pad and button LEDs relight once per "draw" call, diffed against the
+last frame so an unchanged grid or button set costs nothing, instead of
+relighting after every individual handler. The host calls draw
+continuously (30-60fps), so this is at most one frame of latency. It
+also guarantees that every state change, wherever it happens, reaches
+the LEDs, with no need to remember to call relight_* at every call site.
 """
 
 import base64
@@ -80,9 +82,9 @@ class State:
         self.button_held = {}  # button name -> currently pressed, for momentary LED feedback
         self.popup_title = None    # generic transient popup — see show_popup
         self.popup_body = None
-        self.popup_until = 0.0     # time.monotonic() deadline; popup shows while now < this
+        self.popup_until = 0.0     # time.monotonic() deadline. Popup shows while now < this.
 
-        self.active_sequence_name = None    # name Save writes to; None = never saved this session
+        self.active_sequence_name = None    # name Save writes to. None means never saved this session.
         self.sequence_browser_active = False  # True: Set-button overlay owns the screen/grid/D-Pad/jog
         self.sequence_names = []            # cached listing, refreshed each time the browser opens
         self.sequence_cursor = 0            # index into ["New"] + sequence_names
@@ -93,10 +95,11 @@ class State:
     POPUP_DURATION = 1.5  # seconds a popup stays up after show_popup
 
     def show_popup(self, title, body=None):
-        """A transient on-screen popup for a button/knob whose effect
-        isn't otherwise visible (BPM after a Tempo turn, a track's kind
-        after Note toggles it, ...). `title` is the small top line,
-        `body` (optional) the bigger line below it — see view._popup_ops."""
+        """A transient on-screen popup for a button or knob whose effect
+        is not otherwise visible (BPM after a Tempo turn, a track's kind
+        after Note toggles it, and so on). `title` is the small top
+        line. `body` (optional) is the bigger line below it. See
+        view._popup_ops."""
         self.popup_title = title
         self.popup_body = body
         self.popup_until = time.monotonic() + State.POPUP_DURATION
@@ -124,10 +127,10 @@ class State:
 
 
 def relight_grid(state):
-    """Full redraw of the 8x8 pad LEDs — same "redraw, don't diff" choice
-    beatcount-py makes, for the same reason: correctness over message count,
-    and 64 notifications is cheap. Diffed against the last frame so a
-    steady-state grid costs nothing."""
+    """Full redraw of the 8x8 pad LEDs, the same "redraw, do not diff"
+    choice beatcount-py makes, for the same reason: correctness over
+    message count, and 64 notifications is cheap. Diffed against the
+    last frame, so a steady-state grid costs nothing."""
     grid = view.pad_colors(state)
     if grid == state.last_pad_colors:
         return
@@ -138,10 +141,10 @@ def relight_grid(state):
 
 
 def relight_buttons(state):
-    """Full redraw of every managed button LED, same diffed-redraw choice as
-    relight_grid. Wire field is "brightness" (see
-    docs/architecture/process-modules.md's method table); the value is a
-    palette index, same mechanism as set_pad's "colour"."""
+    """Full redraw of every managed button LED, the same diffed-redraw
+    choice as relight_grid. Wire field is "brightness" (see
+    docs/architecture/process-modules.md's method table). The value is a
+    palette index, the same mechanism as set_pad's "colour"."""
     colors = view.button_colors(state)
     if colors == state.last_button_colors:
         return
@@ -200,8 +203,8 @@ def handle_pad(state, data):
         return
     if e.mods["repeat"]:
         # Quick ratchet toggle, Accent's counterpart: 1 <-> 4 repeats.
-        # (The "repeat" encoder already exists — encoder 3 — so holding
-        # Repeat no longer needs to bypass anything; this gives the
+        # (The "repeat" encoder already exists, as encoder 3, so holding
+        # Repeat no longer needs to bypass anything. This gives the
         # button its own one-tap job instead.)
         snapshot_for_undo(state)
         if 0 <= step_idx < t["length"]:
@@ -326,16 +329,17 @@ def handle_button(state, data):
     elif name == "Select (main)":
         e.toggle_main()
     elif name in SCREEN_TOP:
-        # Entry-time gating only: opening from Track mode only works via
-        # column 8 (the one Mod status button actually on screen there —
-        # see view.draw's Track-mode loop), since 1-7 don't map to
-        # anything in that mode. Main mode, and once the overlay is
-        # already open, every column maps to "that column's track" —
-        # the overlay itself doesn't remember which mode opened it, so
-        # closing/switching has to work the same way regardless (press
-        # the currently-open track's own button to close it, any other
-        # to jump straight there — see Engine.open_mod_lane and its LED
-        # in view.button_colors, which highlights whichever one closes).
+        # Entry-time gating only. Opening from Track mode works only via
+        # column 8 (the one Mod status button actually on screen there,
+        # see view.draw's Track-mode loop), because columns 1-7 map to
+        # nothing in that mode. In Main mode, and once the overlay is
+        # already open, every column maps to "that column's track". The
+        # overlay itself does not remember which mode opened it, so
+        # closing or switching works the same way regardless: press the
+        # currently-open track's own button to close it, or any other to
+        # jump straight there. See Engine.open_mod_lane and its LED in
+        # view.button_colors, which highlights whichever button closes
+        # the overlay.
         col = SCREEN_TOP[name]
         if e.mod_lane_active or e.main_selected:
             track_idx, t = e.track_at(col)
@@ -407,9 +411,9 @@ def handle_encoder(state, data):
         return
 
     if e.length_view_active:
-        # Length view is exclusive: only encoder 1 does anything — the
+        # Length view is exclusive. Only encoder 1 does anything: the
         # selected track's Length, throttled like Key/Scale (see
-        # nudge_length) so a small wiggle doesn't jump several steps.
+        # nudge_length), so a small wiggle does not jump several steps.
         if delta and idx == 0:
             e.nudge_length(e.selected_track, delta)
         return
@@ -432,7 +436,7 @@ def handle_encoder(state, data):
         return
 
     if idx is None or idx < 0 or delta == 0:
-        return  # volume/jog-press not used in v1; nothing to do with a zero delta
+        return  # volume/jog-press not used in v1. Nothing to do with a zero delta.
 
     if e.held_pad is not None:
         # "channel" is track-level, not per-step — nothing for a held pad
@@ -478,14 +482,14 @@ _ENCODER_TOUCH_RE = re.compile(r"^Encoder (\d) touch$")
 
 
 def handle_touch(state, data):
-    """Delete (hold) + touch a screen encoder (not turn it — a bare touch
-    fires on every normal turn too, see the mod-lane toggle's own note on
-    why touch-as-trigger needs a modifier) resets that encoder's current
-    parameter to its default. Same param-resolution split as
-    handle_encoder's no-pad-held branches (Main mode: current_param,
-    shared across all 8; Track mode: ENCODER_PARAMS[idx], fixed per
-    encoder); a held pad narrows it to just that one step, same as a
-    normal edit would."""
+    """Hold Delete, then touch a screen encoder (not turn it. A bare
+    touch fires on every normal turn too, see the mod-lane toggle's own
+    note on why touch-as-trigger needs a modifier). This resets that
+    encoder's current parameter to its default. Same param-resolution
+    split as handle_encoder's no-pad-held branches. Main mode uses
+    current_param, shared across all 8. Track mode uses
+    ENCODER_PARAMS[idx], fixed per encoder. A held pad narrows the reset
+    to just that one step, the same as a normal edit."""
     e = state.engine
     if not data.get("touched") or not e.mods.get("delete"):
         return

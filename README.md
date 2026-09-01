@@ -100,6 +100,13 @@ across `TRACK_COLORS` with a stride instead of walking it in order, so
 neighboring tracks don't default to visually-similar colors. See
 [MANUAL.md](MANUAL.md#track-color-picker).
 
+Length view (shipped): `Clip View` (CC113) toggles a dedicated Length
+view — encoder 1 edits the selected track's step count one step at a
+time, down to a floor of 1 (Shift + D-Pad up/down still moves in 8-step
+pages, floored at 8, for fast changes). New tracks/patterns still
+default to 8 steps either way. See
+[MANUAL.md](MANUAL.md#stepping-through-a-long-pattern--d-pad-updown).
+
 Controls pass 2 (shipped): pitch became a real per-step control (this
 found and fixed a real bug in the process: a held-pad encoder edit was
 landing on the wrong step entirely, because the playhead-direction row

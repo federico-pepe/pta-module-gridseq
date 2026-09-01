@@ -248,6 +248,8 @@ def handle_button(state, data):
         e.toggle_play()
     elif name == "Scale":
         e.toggle_scale_mode()
+    elif name == "Clip View":
+        e.toggle_length_view()
     elif name == "Octave Up":
         e.transpose_all(12)
     elif name == "Octave Down":
@@ -404,6 +406,14 @@ def handle_encoder(state, data):
                 e.nudge_scale(e.selected_track, delta)
         return
 
+    if e.length_view_active:
+        # Length view is exclusive: only encoder 1 does anything — the
+        # selected track's Length, throttled like Key/Scale (see
+        # nudge_length) so a small wiggle doesn't jump several steps.
+        if delta and idx == 0:
+            e.nudge_length(e.selected_track, delta)
+        return
+
     if e.mod_lane_active:
         # Mod-lane mode is exclusive: it borrows the grid and D-Pad, and
         # every encoder (including the jog wheel) is irrelevant while
@@ -479,7 +489,7 @@ def handle_touch(state, data):
     e = state.engine
     if not data.get("touched") or not e.mods.get("delete"):
         return
-    if state.sequence_browser_active or e.scale_mode_active or e.mod_lane_active:
+    if state.sequence_browser_active or e.scale_mode_active or e.mod_lane_active or e.length_view_active:
         return
     m = _ENCODER_TOUCH_RE.match(data.get("name") or "")
     if not m:

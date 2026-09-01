@@ -199,6 +199,9 @@ class Engine:
         self._channel_accum = 0         # same, for MIDI Channel
         self._param_accum = {}          # same, per THROTTLED_PARAMS name — see nudge_param
 
+        self.length_view_active = False  # True: encoder 1 is the selected track's Length, the rest blank
+        self._length_accum = 0           # same accumulated-turn technique, for Length
+
         self.last_ext_clock = None
         self.ext_synced_before = False
 
@@ -278,6 +281,7 @@ class Engine:
         self.main_selected = not self.main_selected
         if self.main_selected:
             self.scale_mode_active = False  # exclusive with Scale mode, which requires a specific track selected
+            self.length_view_active = False  # same, for Clip View's Length overlay
 
     def select_track(self, track_idx):
         """Picking a specific track (Screen-bottom button or the jog wheel)
@@ -347,17 +351,18 @@ class Engine:
         if div_name in DIVISIONS:
             t["div"] = div_name
 
-    def set_length(self, track_idx, new_length):
-        """Grows/shrinks the track's step count in units of 8 (one D-Pad
-        page), wired to Shift + D-Pad left/right. Growing appends fresh
+    def set_length(self, track_idx, new_length, floor=DEFAULT_STEPS):
+        """Grows/shrinks the track's step count. Growing appends fresh
         steps; shrinking truncates (data on the dropped tail is lost, same
-        as load()'s existing clamp-to-length behavior). Floors at
-        DEFAULT_STEPS (8) rather than 1 — a track shorter than one page
-        has no D-Pad page to land on."""
+        as load()'s existing clamp-to-length behavior). `floor` defaults to
+        DEFAULT_STEPS (8) for Shift + D-Pad up/down, which moves in whole
+        8-step pages and shouldn't leave a page with nothing to land on;
+        nudge_length (the Clip View length knob, 1-step resolution) passes
+        floor=1 instead, since a track can be as short as a single step."""
         if track_idx is None:
             return
         t = self.tracks[track_idx]
-        new_length = max(DEFAULT_STEPS, min(MAX_STEPS, new_length))
+        new_length = max(floor, min(MAX_STEPS, new_length))
         if new_length == t["length"]:
             return
         if new_length > t["length"]:
@@ -385,6 +390,7 @@ class Engine:
             self.select_track(track_idx)
             self.mod_lane_active = True
             self.scale_mode_active = False  # exclusive with the mod lane overlay
+            self.length_view_active = False  # same
 
     def move_mod_cursor(self, delta):
         self.mod_cursor = max(0, min(MAX_STEPS - 1, self.mod_cursor + delta))
@@ -467,6 +473,7 @@ class Engine:
         self.main_selected = False
         self.mod_lane_active = False
         self.scale_mode_active = False
+        self.length_view_active = False
         self.current_param = 0
 
     def add_track(self, duplicate_from=None):
@@ -560,6 +567,35 @@ class Engine:
             # several sessions ago shouldn't bias the very next tick.
             self._key_accum = 0
             self._scale_accum = 0
+            self.length_view_active = False  # exclusive with Clip View's Length overlay
+
+    def toggle_length_view(self):
+        """Wired to the "Clip View" button (CC113, a plain toggle like
+        Scale). Only encoder 1 does anything while active — the selected
+        track's Length, in 1-step increments (unlike Shift + D-Pad
+        up/down's 8-step pages) — same "needs a specific track selected"
+        gating as Scale mode, and exclusive with it for the same reason:
+        both use the top-of-screen label/value row for something other
+        than Track mode's normal 8-parameter row."""
+        if not self.length_view_active and (self.main_selected or self.mod_lane_active):
+            return
+        self.length_view_active = not self.length_view_active
+        if self.length_view_active:
+            self._length_accum = 0
+            self.scale_mode_active = False
+
+    def nudge_length(self, track_idx, delta):
+        self._length_accum += delta
+        while self._length_accum >= self.KNOB_ACCUM_THRESHOLD:
+            t = self.tracks[track_idx] if track_idx is not None and 0 <= track_idx < len(self.tracks) else None
+            if t is not None:
+                self.set_length(track_idx, t["length"] + 1, floor=1)
+            self._length_accum -= self.KNOB_ACCUM_THRESHOLD
+        while self._length_accum <= -self.KNOB_ACCUM_THRESHOLD:
+            t = self.tracks[track_idx] if track_idx is not None and 0 <= track_idx < len(self.tracks) else None
+            if t is not None:
+                self.set_length(track_idx, t["length"] - 1, floor=1)
+            self._length_accum += self.KNOB_ACCUM_THRESHOLD
 
     # Params where an accumulated turn is required per step, same
     # technique (and threshold) as nudge_key/nudge_scale — a plain

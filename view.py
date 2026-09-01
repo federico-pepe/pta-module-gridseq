@@ -41,7 +41,7 @@ INAUDIBLE_STEP = 118  # "gray_mid" — an on step for a track that won't actuall
 BTN_OFF = 0
 BTN_DIM = 118      # "gray_mid" — visibly lit but low-intensity, for "inactive"
 BTN_FULL = 122     # "lgray"/"white_btn" — full button-white, for "active"
-BTN_GREEN = 11     # Play, while the transport is running
+BTN_GREEN = 126     # Play, while the transport is running
 MOD_LANE_OPEN = 127  # "pure_red" — the open mod lane's Screen top button, signaling "click to exit"
 
 # The active time-division button pulses between these two — vivid bright
@@ -49,9 +49,9 @@ MOD_LANE_OPEN = 127  # "pure_red" — the open mod lane's Screen top button, sig
 # unmistakable which division is running (there's no real analog
 # brightness/PWM for button LEDs, just a fixed palette, so a blink between
 # two entries is the closest thing to "pulsing").
-DIV_ACTIVE_HI = 10  # "green_vivid"
+DIV_ACTIVE_HI = 126  # "green_vivid"
 DIV_ACTIVE_LO = 0   # off/black
-PULSE_HZ = 2.0
+PULSE_HZ = 1.0
 
 
 def _pulsing_div_color():
@@ -80,6 +80,7 @@ BUTTON_CC = {
     "Mute": 60,
     "Solo": 61,
     "Scale": 58,
+    "Clip View": 113,
     "Repeat": 56,
     "Accent": 57,
     "Shift": 49,
@@ -174,6 +175,15 @@ def button_colors(state):
     else:
         out["Scale"] = BTN_DIM
 
+    # Clip View is a toggle (Length view), same shape as Scale above —
+    # full while active, off while unavailable, dim otherwise.
+    if e.length_view_active:
+        out["Clip View"] = BTN_FULL
+    elif e.main_selected or e.mod_lane_active:
+        out["Clip View"] = BTN_OFF
+    else:
+        out["Clip View"] = BTN_DIM
+
     # While mod-lane mode is active, the Scene buttons set the selected
     # track's mod division instead of its note division — pulse the one
     # that matches mod_div instead of div.
@@ -197,7 +207,7 @@ def button_colors(state):
         idx, ct = e.track_at(col)
         if e.mod_lane_active:
             out[name] = MOD_LANE_OPEN if idx == e.selected_track else BTN_OFF
-        elif e.scale_mode_active:
+        elif e.scale_mode_active or e.length_view_active:
             out[name] = BTN_OFF
         elif e.main_selected:
             shows_mod = ct is not None and eng.ENCODER_PARAMS[e.current_param] == "mod lane"
@@ -498,6 +508,15 @@ def draw(state):
             scale_name = t["scale"].replace("_", " ").title()
             ops.append({"kind": "text", "params": {"x": col_w + 4, "baseline": PARAM_LABEL_BASELINE, "s": "Scale", "c": c}})
             ops.append(_value_op(col_w + 4, PARAM_VALUE_BASELINE, scale_name, c))
+    elif e.length_view_active:
+        # Length view (Clip View button): only column 1 means anything —
+        # the selected track's Length, in 1-step increments — the other 7
+        # deliberately blank, same shape as Scale mode above.
+        t = e.selected()
+        if t is not None:
+            c = color_by_index(t["color"])
+            ops.append({"kind": "text", "params": {"x": 4, "baseline": PARAM_LABEL_BASELINE, "s": "Length", "c": c}})
+            ops.append(_value_op(4, PARAM_VALUE_BASELINE, str(t["length"]), c))
     elif e.mod_lane_active:
         # Mod-lane mode: columns = tracks' mod lanes (same as always),
         # label = that track's own mod division (independent per track),

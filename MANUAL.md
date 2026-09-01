@@ -341,6 +341,18 @@ tail, so shrinking then growing back does not restore what was there.
 D-Pad's LEDs switch meaning while Shift is held: dim = room to
 shrink/grow, off = at the floor/ceiling.
 
+**Clip View** (a plain toggle, top-right of the encoder row) opens a
+dedicated Length view for fine control: the screen's top-left label/value
+switches to "Length" and the selected track's step count, and encoder 1
+edits it one step at a time — down to a floor of **1**, not 8, so a track
+can be shorter than a full D-Pad page (the other 7 encoders go blank
+while this is open). Same throttled-turn feel as Key/Scale in Scale
+mode — a deliberate turn is needed per step change, not just any small
+wiggle. Exclusive with Scale mode (opening either closes the other) and
+unavailable in Main mode or with the mod lane open, same gating as Scale
+mode. New tracks/patterns still default to 8 steps; only this knob (or
+Shift + D-Pad) changes that afterward.
+
 ## Undo
 
 **Undo** reverses the last step/param/mute/solo/division/kind/Add

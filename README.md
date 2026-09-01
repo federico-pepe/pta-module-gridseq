@@ -78,6 +78,28 @@ silenced by another track's solo) turns grey — both its pad steps and
 its bottom-strip label — driven by the same `Engine.track_audible()`
 check already used at trigger time, not a separate visual flag.
 
+Controls pass 3 (shipped): `Add` (CC32) replaces `Duplicate` (CC88) as
+the "append a new track, copied from the selected one" button — same
+behavior, correctly-named physical button. `Save` (CC82) and `Set`
+(CC80) give the pattern its own named file-based save/load, independent
+of the (still-disabled) `store_get`/`store_set` single-pattern slot: Save
+writes the current pattern to `sequences/<name>.json` (auto-named
+"Sequence N" the first time), Set opens a full-screen list of every
+saved sequence plus "New", scrollable by jog wheel or D-Pad up/down and
+confirmed by Jog press or D-Pad center. `Delete` (hold) + touching a
+screen encoder resets that encoder's current parameter to its default —
+just that step if one's held, the whole track otherwise. See
+[MANUAL.md](MANUAL.md#saving-and-loading-sequences) for the full
+behavior of both.
+
+Track color picker (shipped): Shift (hold) + a track's Screen-bottom
+button borrows the pad grid for a color-picker overlay — the border
+pads light up with GridSeq's 26 track colors, tap one to assign it to
+the selected track, release Shift to exit. New tracks now also spread
+across `TRACK_COLORS` with a stride instead of walking it in order, so
+neighboring tracks don't default to visually-similar colors. See
+[MANUAL.md](MANUAL.md#track-color-picker).
+
 Controls pass 2 (shipped): pitch became a real per-step control (this
 found and fixed a real bug in the process: a held-pad encoder edit was
 landing on the wrong step entirely, because the playhead-direction row

@@ -56,11 +56,18 @@ two explicit, mutually exclusive modes instead:
   that exact step, in either mode, using whichever parameter the mode
   currently resolves to.
 
-**Visual language.** Every track has one color from the hardware's
-"Vivid" palette row only (`docs/push3-led-colors.md` upstream in
-ableton-push-hack — indices `[1, 9, 10, 13, 17, 21, 22, 25, 26]`, yellow
-excluded on purpose, see below) shared by its pad LEDs, its bottom-strip
-label, and its column text. Screen-bottom buttons are black by default,
+**Visual language.** Every track has one color, shared by its pad LEDs,
+its bottom-strip label, and its column text. *(Superseded — `TRACK_COLORS`
+started as the hardware "Vivid" row `[1, 9, 10, 13, 17, 21, 22, 25, 26]`
+with yellow excluded, but is now a larger, hand-picked-on-hardware list
+that includes yellow — the division pulse below moved to green instead.
+New tracks also no longer walk that list 1-by-1: they stride through it
+by `TRACK_COLOR_STEP` so neighboring tracks don't land on adjacent,
+visually-similar entries. A Shift + Screen-bottom color-picker overlay
+lets a track's color be set by hand from the pad grid. See `engine.py`'s
+`TRACK_COLORS`/`TRACK_COLOR_STEP`/`color_picker_grid` and CLAUDE.md's
+Colors section for the current state.)* Screen-bottom buttons are black
+by default,
 lighting only for the selected track, in that track's color — deliberate
 "black = no track owns this" instead of a generic dim-gray for every
 populated-but-unselected slot. The active time-division button pulses
@@ -585,6 +592,55 @@ one message:
    exactly what makes the red-LED-is-the-close-button promise actually
    hold.
 
+**Controls pass 3: Add replaces Duplicate, file-based named sequences
+(Save/Set), Delete+touch param reset.** Three more hardware-driven
+requests:
+
+- **`Duplicate` (CC88) → `Add` (CC32).** Pure rebind to the correctly-
+  named physical button — `Engine.add_track(duplicate_from=...)` and its
+  "copy the selected track" behavior are unchanged, only which button
+  and which `view.BUTTON_CC`/`handle_button` name reach it.
+- **Save/Set named sequences.** A second, independent persistence path
+  from the host's `store_get`/`store_set` single-doc slot (which stays
+  disabled, `PERSIST_ENABLED = False`): `Save` (CC82) writes
+  `Engine.to_doc()` straight to a JSON file in this module's own
+  `sequences/` directory (gitignored — user data, not source), named
+  after `State.active_sequence_name` (auto-assigned "Sequence N" the
+  first time, since there's no text entry on this hardware to name it by
+  hand). `Set` (CC80) toggles a full-screen browser overlay
+  (`view._sequence_browser_ops`) listing "New" plus every saved name,
+  exclusive over the grid/other encoders/Tempo the same way the mod-lane
+  overlay is (`State.sequence_browser_active`, checked first in
+  `handle_pad`/`handle_encoder`, and in `view.pad_colors`/`draw`). Jog
+  wheel or D-Pad up/down scroll `State.sequence_cursor`; **Jog press
+  (CC94) or D-Pad center (CC91)** confirm — chosen over a plain pad tap
+  or live-apply-while-scrolling specifically because those two already
+  exist as unbound momentary buttons and a hardware "click to confirm"
+  gesture reads more intentional than a pad tap or a scroll that
+  silently discards the current unsaved pattern the instant you scroll
+  past it. `Engine.enter_sequence(doc)` (doc=None for "New") resets
+  navigation/overlay state too (`track_page`, `selected_track`, which
+  mode was open), not just pattern data, and stops playback first so the
+  outgoing pattern's notes don't hang. This is deliberately *not* the
+  `{slots, chain}` v3 schema change described under "Pattern slots" below
+  — it's files-on-disk, switched by a full engine-state swap, with no
+  chaining/song-position concept at all; that harder design is still
+  open.
+- **Delete + touch encoder = reset to default.** `Delete` (CC118, a
+  held modifier like `Shift`) + touching (not turning — a bare touch
+  already fires on every normal turn, so touch-as-trigger needs a
+  modifier held, same reasoning the mod-lane toggle button's own design
+  note gives for not using an encoder touch there) a screen encoder
+  resets that encoder's current parameter to `new_step()`'s (or
+  `new_track()`'s, for Channel) default value, via a new
+  `Engine.reset_param`. Wired through the wire protocol's `"touch"`
+  event kind (`Touch{Name, Touched}`, e.g. `"Encoder 3 touch"`) — unused
+  by GridSeq before this, since nothing needed encoder-touch data on its
+  own until a modifier-gated reset needed it. No-ops in Scale mode, the
+  mod-lane overlay, and the sequence browser, and for "mod lane" (a
+  status page, not an editable value) — same set of "nothing sensible to
+  target" exclusions `handle_encoder`'s own branches already use.
+
 ## Open / not built
 
 **Mod status page visualization.** The Mod column (Track/Main mode) is
@@ -595,11 +651,14 @@ lane's current shape, or its `mod_length`/`mod_div` at a glance) — same
 "don't build UI blind" lesson the mod-lane editor itself already went
 through.
 
-**Pattern slots / song chaining (v3).** Multiple saved pattern slots
-and a simple chain (next-slot-on-repeat-count, OXI-Arranger-lite) per
-the original plan. Deferred until the above are settled, since it's the
-biggest remaining schema change (`Store` grows from one `Pattern` to
-`{slots, chain}`) and should land once, not iteratively.
+**Pattern slots / song chaining (v3).** A simple chain
+(next-slot-on-repeat-count, OXI-Arranger-lite) per the original plan —
+still open even though "multiple saved patterns" itself shipped via the
+file-based Save/Set sequences above (controls pass 3). Chaining needs
+slots live *in the running doc* with song-position state, which the
+file-swap approach deliberately doesn't have — still the biggest
+remaining schema change (`Store` grows from one `Pattern` to `{slots,
+chain}`) and should land once, not iteratively.
 
 ## Decisions considered and rejected (so they aren't re-litigated)
 

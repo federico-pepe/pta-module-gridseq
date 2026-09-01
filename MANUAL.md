@@ -207,6 +207,21 @@ checked at trigger time in `_trigger_step`/`_trigger_mod_step`) — there's
 no MIDI "mute message"; this is the only way to mute/solo MIDI output
 from here.
 
+## Track color picker
+
+**Shift** (hold) + tap a track's **Screen-bottom** button: selects that
+track and borrows the whole pad grid for a color picker — every pad goes
+dark except the outer **border** ring, which lights up with GridSeq's 26
+track colors, one per border pad, starting at the pad just left of
+bottom-center and running clockwise around the edge (2 border pads at
+the end of the loop are left dark — there are 28 border pads and only 26
+colors). Tap any lit border pad to assign that color to the selected
+track immediately — its pad steps, Screen-bottom button, and Screen-top
+Mod button all switch to it right away, and you can tap a different
+border pad to change your mind before letting go. Release **Shift** to
+exit and get the normal step grid back; nothing else (mute/solo, step
+editing, encoders) is reachable while the picker is open.
+
 ## Tempo
 
 Turn the **Tempo wheel** (top-right of the encoder row) to change the
@@ -302,9 +317,9 @@ being "stuck."
 Fixed: Page Right is now a no-op (and its LED goes fully **off**, not
 just dim) once you're on the last page that actually has a track in it.
 To get a 9th track (and somewhere for Page Right to go), press
-**Duplicate** — it appends a new track, copied from the currently
+**Add** — it appends a new track, copied from the currently
 selected one (kind, channel, division, root, scale, length, and all its
-steps). Keep pressing Duplicate to grow further, up to 16 tracks total.
+steps). Keep pressing Add to grow further, up to 16 tracks total.
 Page Left/Right's LEDs tell you at a glance whether there's anywhere to
 page to: dim = yes, off = no, full white = held.
 
@@ -328,10 +343,47 @@ shrink/grow, off = at the floor/ceiling.
 
 ## Undo
 
-**Undo** reverses the last step/param/mute/solo/division/kind/Duplicate
+**Undo** reverses the last step/param/mute/solo/division/kind/Add
 edit — one level only, not a deep history. Its LED is lit full white
 whenever there's something to undo, dim when there isn't, so you can see
 at a glance whether pressing it will do anything.
+
+## Resetting a parameter to its default
+
+**Delete (hold) + touch a screen encoder** (a light touch, not a turn or
+a click — same capacitive sensor that already fires on every normal
+turn, see "Mod lane" for why that matters) snaps that encoder's current
+parameter back to its default value: 100 for Velocity, 50 for Gate, 1
+for Repeat, 100 for Probability, 0 for Offset, 0 (root note) for Pitch,
+1 for MIDI Channel. With a step pad held, only that step resets; with
+nothing held, every step on the track resets. Has no effect on Mod (a
+status page, not an editable value here) or while Scale mode or the mod
+lane overlay is active.
+
+## Saving and loading sequences
+
+**Save** writes the current pattern to a file, under the name it was
+last saved or loaded as. The very first Save of a session (nothing
+loaded yet) auto-names it "Sequence 1", "Sequence 2", … — there's no
+text entry on this hardware to name it by hand. A "SAVED &lt;name&gt;"
+popup confirms.
+
+**Set** opens a full-screen list of every saved sequence, "New" always
+first. Scroll with the jog wheel or D-Pad up/down (D-Pad up = earlier
+in the list, matching every other D-Pad-scrolling context in this
+manual). **Jog press or D-Pad center** confirms the highlighted entry:
+picking "New" resets to a fresh default 8-track pattern; picking a
+saved name loads it. Either way the pattern you were on is **not**
+auto-saved first — Save it beforehand if you want to keep it. Pressing
+**Set** again with nothing else pressed just closes the list without
+changing anything. While the list is open, the pad grid, the other 7
+encoders, and Tempo are all inert — same "one overlay owns everything"
+exclusivity as the mod-lane overlay.
+
+Sequence files live in this module's own `sequences/` folder as plain
+JSON, one per sequence — a separate mechanism from the host's
+`store_get`/`store_set` single-pattern slot described below (which stays
+disabled either way).
 
 ## Button LED legend
 

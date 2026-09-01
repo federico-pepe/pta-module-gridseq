@@ -24,11 +24,20 @@ to remember to call relight_* at every call site.
 import base64
 import copy
 import json
+import os
+import re
 import sys
 import time
 
 import engine as eng
 import view
+
+# Saved sequences (Save/Set buttons) are plain JSON files in this directory,
+# one per sequence, named after the sequence — a separate mechanism from the
+# host's store_get/store_set (single-doc, currently disabled via
+# PERSIST_ENABLED below), since Save/Set is explicitly about naming and
+# switching between several sequences, not a single "the pattern" slot.
+SEQUENCES_DIR = os.path.join(os.path.dirname(__file__), "sequences")
 
 # Persistence is temporarily disabled: every module start begins from a
 # fresh default pattern, and nothing is written to the host's store on
@@ -72,6 +81,12 @@ class State:
         self.popup_title = None    # generic transient popup — see show_popup
         self.popup_body = None
         self.popup_until = 0.0     # time.monotonic() deadline; popup shows while now < this
+
+        self.active_sequence_name = None    # name Save writes to; None = never saved this session
+        self.sequence_browser_active = False  # True: Set-button overlay owns the screen/grid/D-Pad/jog
+        self.sequence_names = []            # cached listing, refreshed each time the browser opens
+        self.sequence_cursor = 0            # index into ["New"] + sequence_names
+
         self._next_id = 1000
         self._pending = {}  # request id -> tag string, for responses we care about
 
@@ -143,12 +158,21 @@ def snapshot_for_undo(state):
 
 def handle_pad(state, data):
     e = state.engine
+    if state.sequence_browser_active:
+        return  # grid is inert while the Set-button browser owns the screen
     col, row = data.get("col"), data.get("row")
     pressed = data.get("pressed")
 
     if not pressed:
         if e.held_pad == (col, row):
             e.held_pad = None
+        return
+
+    if e.color_picker_active:
+        color = eng.color_picker_grid().get((row, col))
+        if color is not None:
+            snapshot_for_undo(state)
+            e.set_track_color(color)
         return
 
     track_idx, t = e.track_at(col)
@@ -209,10 +233,12 @@ def handle_button(state, data):
     mod_key = {
         "Mute": "mute", "Solo": "solo",
         "Repeat": "repeat", "Accent": "accent",
-        "Shift": "shift",
+        "Shift": "shift", "Delete": "delete",
     }.get(name)
     if mod_key:
         e.mods[mod_key] = bool(pressed)
+        if mod_key == "shift" and not pressed and e.color_picker_active:
+            e.exit_color_picker()
         return
 
     if not pressed:
@@ -237,7 +263,9 @@ def handle_button(state, data):
         # matching the playhead's own direction. Left/right are unused
         # for this now (moved off them since time reads vertically here,
         # not horizontally).
-        if e.mod_lane_active:
+        if state.sequence_browser_active:
+            state.sequence_cursor = max(0, state.sequence_cursor - 1)
+        elif e.mod_lane_active:
             e.move_mod_cursor(-1)
         elif e.mods["shift"]:
             snapshot_for_undo(state)
@@ -249,7 +277,10 @@ def handle_button(state, data):
             if t and t["step_page"] > 0:
                 t["step_page"] -= 1
     elif name == "D-Pad down":
-        if e.mod_lane_active:
+        if state.sequence_browser_active:
+            items_len = 1 + len(state.sequence_names)
+            state.sequence_cursor = min(items_len - 1, state.sequence_cursor + 1)
+        elif e.mod_lane_active:
             e.move_mod_cursor(1)
         elif e.mods["shift"]:
             snapshot_for_undo(state)
@@ -260,9 +291,26 @@ def handle_button(state, data):
             t = e.selected()
             if t and (t["step_page"] + 1) * 8 < t["length"]:
                 t["step_page"] += 1
-    elif name == "Duplicate":
+    elif name == "Add":
         snapshot_for_undo(state)
         e.add_track(duplicate_from=e.selected_track)
+    elif name == "Save":
+        if state.active_sequence_name is None:
+            state.active_sequence_name = next_sequence_name()
+        save_sequence(state, state.active_sequence_name)
+        state.show_popup("SAVED", state.active_sequence_name)
+    elif name == "Set":
+        # Plain toggle — a second press with nothing else pressed in
+        # between just closes the browser without applying any selection
+        # (Jog press / D-Pad center is what commits — see below).
+        if state.sequence_browser_active:
+            state.sequence_browser_active = False
+        else:
+            state.sequence_browser_active = True
+            state.sequence_names = list_sequences()
+            state.sequence_cursor = 0
+    elif name in ("Jog press", "D-Pad center") and state.sequence_browser_active:
+        confirm_sequence_selection(state)
     elif name == "Undo":
         if state.undo_snapshot is not None:
             e.load(state.undo_snapshot)
@@ -304,6 +352,8 @@ def handle_button(state, data):
         elif e.mods["solo"]:
             snapshot_for_undo(state)
             t["solo"] = not t["solo"]
+        elif e.mods["shift"]:
+            e.enter_color_picker(track_idx)
         else:
             e.select_track(track_idx)
 
@@ -325,6 +375,16 @@ def handle_encoder(state, data):
     idx = data.get("index")
     delta = data.get("delta") or 0
     name = data.get("name") or ""
+
+    if state.sequence_browser_active:
+        # Every encoder (including Tempo) is inert here except the jog
+        # wheel, which scrolls the list — same "borrow everything, one
+        # exception" shape as mod-lane mode borrowing the grid/D-Pad.
+        if name == "Jog wheel turn" and delta:
+            items_len = 1 + len(state.sequence_names)
+            step = 1 if delta > 0 else -1
+            state.sequence_cursor = max(0, min(items_len - 1, state.sequence_cursor + step))
+        return
 
     if name == "Tempo wheel turn":
         if delta:
@@ -404,6 +464,62 @@ def handle_encoder(state, data):
     e.nudge_param(e.selected_track, None, param_name, delta)
 
 
+_ENCODER_TOUCH_RE = re.compile(r"^Encoder (\d) touch$")
+
+
+def handle_touch(state, data):
+    """Delete (hold) + touch a screen encoder (not turn it — a bare touch
+    fires on every normal turn too, see the mod-lane toggle's own note on
+    why touch-as-trigger needs a modifier) resets that encoder's current
+    parameter to its default. Same param-resolution split as
+    handle_encoder's no-pad-held branches (Main mode: current_param,
+    shared across all 8; Track mode: ENCODER_PARAMS[idx], fixed per
+    encoder); a held pad narrows it to just that one step, same as a
+    normal edit would."""
+    e = state.engine
+    if not data.get("touched") or not e.mods.get("delete"):
+        return
+    if state.sequence_browser_active or e.scale_mode_active or e.mod_lane_active:
+        return
+    m = _ENCODER_TOUCH_RE.match(data.get("name") or "")
+    if not m:
+        return
+    idx = int(m.group(1)) - 1
+
+    if e.held_pad is not None:
+        hcol, hrow = e.held_pad
+        h_track_idx, h_t = e.track_at(hcol)
+        if h_t is None:
+            return
+        param_name = eng.ENCODER_PARAMS[e.current_param if e.main_selected else idx]
+        if param_name in eng.NOOP_PARAMS or param_name == "channel":
+            return
+        snapshot_for_undo(state)
+        held_step = h_t["step_page"] * 8 + (7 - hrow)
+        e.reset_param(h_track_idx, held_step, param_name)
+        return
+
+    if e.main_selected:
+        track_idx, t = e.track_at(idx)
+        if t is None:
+            return
+        param_name = eng.ENCODER_PARAMS[e.current_param]
+        if param_name in eng.NOOP_PARAMS:
+            return
+        snapshot_for_undo(state)
+        e.reset_param(track_idx, None, param_name)
+        return
+
+    t = e.selected()
+    if t is None:
+        return
+    param_name = eng.ENCODER_PARAMS[idx]
+    if param_name in eng.NOOP_PARAMS:
+        return
+    snapshot_for_undo(state)
+    e.reset_param(e.selected_track, None, param_name)
+
+
 def handle_external_midi(state, data):
     raw = base64.b64decode(data.get("raw", ""))
     if not raw:
@@ -431,6 +547,62 @@ def save_pattern(state):
     if not PERSIST_ENABLED:
         return
     state.request("store_set", {"doc": state.engine.to_doc()})
+
+
+def list_sequences():
+    if not os.path.isdir(SEQUENCES_DIR):
+        return []
+    return sorted(f[:-5] for f in os.listdir(SEQUENCES_DIR) if f.endswith(".json"))
+
+
+def save_sequence(state, name):
+    os.makedirs(SEQUENCES_DIR, exist_ok=True)
+    path = os.path.join(SEQUENCES_DIR, name + ".json")
+    with open(path, "w") as f:
+        json.dump(state.engine.to_doc(), f)
+
+
+def load_sequence_doc(name):
+    path = os.path.join(SEQUENCES_DIR, name + ".json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def next_sequence_name():
+    """First unused "Sequence N" — Save's auto-name for a pattern that's
+    never been saved or loaded this session (active_sequence_name is
+    None), since there's no text entry on this hardware to name it by
+    hand."""
+    existing = set(list_sequences())
+    n = 1
+    while ("Sequence %d" % n) in existing:
+        n += 1
+    return "Sequence %d" % n
+
+
+def confirm_sequence_selection(state):
+    """Jog press / D-Pad center while the Set-button browser is open:
+    commits whatever's highlighted — "New" resets to a fresh pattern,
+    anything else loads that saved sequence — and closes the browser."""
+    items = ["New"] + state.sequence_names
+    idx = state.sequence_cursor
+    if 0 <= idx < len(items):
+        choice = items[idx]
+        if choice == "New":
+            state.engine.enter_sequence(None)
+            state.active_sequence_name = None
+            state.show_popup("NEW", "Sequence")
+        else:
+            doc = load_sequence_doc(choice)
+            if doc is not None:
+                state.engine.enter_sequence(doc)
+                state.active_sequence_name = choice
+                state.show_popup("LOADED", choice)
+    state.sequence_browser_active = False
+    state.last_pad_colors = None
 
 
 def main():
@@ -465,6 +637,8 @@ def main():
                 handle_button(state, data)
             elif kind == "encoder":
                 handle_encoder(state, data)
+            elif kind == "touch":
+                handle_touch(state, data)
             elif kind == "external_midi":
                 handle_external_midi(state, data)
         elif method == "draw":

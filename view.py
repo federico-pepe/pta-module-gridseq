@@ -70,8 +70,13 @@ BUTTON_CC = {
     "Page Right": 63,
     "D-Pad up": 46,
     "D-Pad down": 47,
+    "D-Pad center": 91,
+    "Jog press": 94,
     "Undo": 119,
-    "Duplicate": 88,
+    "Add": 32,
+    "Save": 82,
+    "Set": 80,
+    "Delete": 118,
     "Mute": 60,
     "Solo": 61,
     "Scale": 58,
@@ -115,7 +120,17 @@ def button_colors(state):
         BTN_DIM if e.track_page + 8 < len(e.tracks) else BTN_OFF)
 
     t = e.selected()
-    if e.mod_lane_active:
+    if state.sequence_browser_active:
+        # D-Pad (and the jog wheel — see handle_encoder) scroll the
+        # sequence list instead of paging/length while the Set-button
+        # browser is open — LEDs reflect room to scroll, same pattern as
+        # every other D-Pad-repurposing mode below.
+        items_len = 1 + len(state.sequence_names)
+        out["D-Pad up"] = BTN_FULL if held.get("D-Pad up") else (
+            BTN_DIM if state.sequence_cursor > 0 else BTN_OFF)
+        out["D-Pad down"] = BTN_FULL if held.get("D-Pad down") else (
+            BTN_DIM if state.sequence_cursor < items_len - 1 else BTN_OFF)
+    elif e.mod_lane_active:
         # D-Pad moves the mod-lane cursor instead of paging/length — LEDs
         # reflect room to move the cursor up/down.
         out["D-Pad up"] = BTN_FULL if held.get("D-Pad up") else (
@@ -136,10 +151,17 @@ def button_colors(state):
             BTN_DIM if (t and (t["step_page"] + 1) * 8 < t["length"]) else BTN_OFF)
 
     out["Undo"] = BTN_FULL if state.undo_snapshot is not None else BTN_DIM
-    out["Duplicate"] = BTN_FULL if held.get("Duplicate") else (
+    out["Add"] = BTN_FULL if held.get("Add") else (
         BTN_DIM if len(e.tracks) < eng.MAX_TRACKS else BTN_OFF)
 
-    for name in ("Mute", "Solo", "Repeat", "Accent", "Shift"):
+    out["Save"] = BTN_FULL if held.get("Save") else BTN_DIM
+    out["Set"] = BTN_FULL if state.sequence_browser_active else BTN_DIM
+    out["D-Pad center"] = BTN_FULL if held.get("D-Pad center") else (
+        BTN_DIM if state.sequence_browser_active else BTN_OFF)
+    out["Jog press"] = BTN_FULL if held.get("Jog press") else (
+        BTN_DIM if state.sequence_browser_active else BTN_OFF)
+
+    for name in ("Mute", "Solo", "Repeat", "Accent", "Shift", "Delete"):
         out[name] = BTN_FULL if e.mods.get(name.lower()) else BTN_DIM
 
     # Scale is a toggle (Scale mode), not a held modifier — full while
@@ -234,6 +256,13 @@ def pad_colors(state):
     latest, so the playhead reads top-to-bottom — see handle_pad's
     matching (7 - row) in run.py."""
     e = state.engine
+    if state.sequence_browser_active:
+        # Grid has no meaning while the Set-button browser has the
+        # screen — same "borrow the whole surface" exclusivity as the
+        # mod-lane overlay, just with nothing for pads to do at all.
+        return [[OFF for _ in range(8)] for _ in range(8)]
+    if e.color_picker_active:
+        return color_picker_pad_colors(state)
     if e.mod_lane_active:
         return mod_lane_pad_colors(state)
     grid = [[OFF for _ in range(8)] for _ in range(8)]
@@ -256,6 +285,16 @@ def pad_colors(state):
                 grid[row][col] = t["color"] if e.track_audible(t) else INAUDIBLE_STEP
             else:
                 grid[row][col] = OFF
+    return grid
+
+
+def color_picker_pad_colors(state):
+    """The color-picker border overlay (Shift + Screen-bottom): whole grid
+    dark except the border pads, each lit with one TRACK_COLORS entry — see
+    eng.color_picker_grid for the border walk and (row, col) mapping."""
+    grid = [[OFF for _ in range(8)] for _ in range(8)]
+    for (row, col), color in eng.color_picker_grid().items():
+        grid[row][col] = color
     return grid
 
 
@@ -392,10 +431,47 @@ def _mod_button_ops(x, col_w, c):
     ]
 
 
+SEQ_LIST_X = 20
+SEQ_LIST_Y = 30
+SEQ_LIST_ROW_H = 20
+SEQ_LIST_VISIBLE = 6  # rows shown at once; the list scrolls to keep the cursor in view
+SEQ_LIST_W = 400
+
+
+def _sequence_browser_ops(state):
+    """Full-screen takeover for the Set-button sequence browser: "New"
+    first, then every saved sequence name, cursor highlighted as a
+    filled bar (same look popups use for their box) — see
+    State.sequence_browser_active in run.py for how the list is scrolled
+    (D-Pad up/down, jog wheel) and confirmed (Jog press / D-Pad center)."""
+    black = color("off")
+    white = color("white")
+    items = ["New"] + state.sequence_names
+    cursor = max(0, min(len(items) - 1, state.sequence_cursor))
+    ops = [{"kind": "rect", "params": {"x": 0, "y": 0, "w": 960, "h": 160, "c": black}}]
+    ops.append({"kind": "text", "params": {"x": SEQ_LIST_X, "baseline": PARAM_LABEL_BASELINE, "s": "SET: SEQUENCES", "c": white}})
+    start = max(0, min(cursor - SEQ_LIST_VISIBLE // 2, max(0, len(items) - SEQ_LIST_VISIBLE)))
+    for i in range(start, min(len(items), start + SEQ_LIST_VISIBLE)):
+        y = SEQ_LIST_Y + (i - start) * SEQ_LIST_ROW_H
+        label = items[i]
+        if i == cursor:
+            ops.append({"kind": "rect", "params": {"x": SEQ_LIST_X, "y": y, "w": SEQ_LIST_W, "h": SEQ_LIST_ROW_H, "c": white}})
+            ops.append({"kind": "text", "params": {"x": SEQ_LIST_X + 8, "baseline": y + 15, "s": label, "c": black}})
+        else:
+            ops.append({"kind": "text", "params": {"x": SEQ_LIST_X + 8, "baseline": y + 15, "s": label, "c": white}})
+    return ops
+
+
 def draw(state):
     e = state.engine
     black = color("off")
     gray = color("gray_green")
+
+    if state.sequence_browser_active:
+        ops = _sequence_browser_ops(state)
+        if state.popup_title is not None and time.monotonic() < state.popup_until:
+            ops.extend(_popup_ops(state.popup_title, state.popup_body))
+        return {"ops": ops, "failed": 0}
 
     ops = [
         {"kind": "rect", "params": {"x": 0, "y": 0, "w": 960, "h": 160, "c": black}},

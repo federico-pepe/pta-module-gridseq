@@ -70,13 +70,45 @@ NOOP_PARAMS = ("mod lane",)
 MOD_BUCKETS = [round(i * 127 / 7) for i in range(8)]
 
 # Palette indices (core/push3.Palette, see palette.json) used for track
-# colors, cycled across DEFAULT_TRACK_COUNT+ tracks. Restricted to the
-# hardware's "Vivid" row (docs/push3-led-colors.md) so every track color
-# reads clearly on the small pad LEDs — no muddy/dark palette entries.
-# Yellow (7) is deliberately excluded: it's reserved for the pulsing
-# active-time-division indicator (see view.py), so a track's own color
-# never gets confused with that.
-TRACK_COLORS = [1, 9, 10, 13, 17, 21, 22, 25, 26]
+# colors, cycled across DEFAULT_TRACK_COUNT+ tracks. Hand-picked on real
+# Push hardware (not a mechanical "Vivid row" slice) — order and set are
+# chosen for what reads clearly and stays distinct on the small pad LEDs,
+# so don't reorder/regenerate this list without re-testing on hardware.
+# Yellow (7) is included here on purpose: the active-time-division pulse
+# (DIV_ACTIVE_HI/LO in view.py) moved to green, so yellow no longer needs
+# to be reserved.
+TRACK_COLORS = [1, 2, 3, 4, 6, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26, 25]
+
+# New tracks step through TRACK_COLORS by this stride instead of 1-by-1:
+# adjacent entries in the hand-picked list can be close hues (e.g. indices
+# 0-3 are all red/orange family), so a straight walk gives neighboring
+# *tracks* similar colors too. 3 is coprime with len(TRACK_COLORS) (26 =
+# 2*13), so the walk still visits all 26 colors before repeating — every
+# track up to MAX_TRACKS (16) still gets a color no other track has.
+TRACK_COLOR_STEP = 3
+
+# The color-picker overlay (Shift + Screen-bottom, see Engine.enter_color_
+# picker) paints TRACK_COLORS around the grid's border pads, one color per
+# pad, starting at pad note 38 (row 0/bottom, col 2 — see run.py's
+# pad_note) and walking clockwise: left along the bottom edge, up the left
+# edge, right along the top edge, down the right edge, back along the
+# bottom to one pad short of the start. (row, col) tuples, row 0 = bottom
+# per pad_note's own convention. 28 border pads, 26 TRACK_COLORS — the
+# last 2 pads in the walk are left unlit.
+COLOR_PICKER_BORDER = [
+    (0, 2), (0, 1), (0, 0),
+    (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0),
+    (7, 1), (7, 2), (7, 3), (7, 4), (7, 5), (7, 6), (7, 7),
+    (6, 7), (5, 7), (4, 7), (3, 7), (2, 7), (1, 7), (0, 7),
+    (0, 6), (0, 5), (0, 4), (0, 3),
+]
+
+
+def color_picker_grid():
+    """Maps each border pad's (row, col) to the TRACK_COLORS entry it
+    offers in the color-picker overlay. Shared by view.py (drawing the
+    overlay) and run.py (hit-testing a pad press against it)."""
+    return {pos: TRACK_COLORS[i] for i, pos in enumerate(COLOR_PICKER_BORDER) if i < len(TRACK_COLORS)}
 
 
 def new_step():
@@ -104,7 +136,7 @@ def new_track(index):
         "solo": False,
         "length": DEFAULT_STEPS,
         "steps": [new_step() for _ in range(DEFAULT_STEPS)],
-        "color": TRACK_COLORS[index % len(TRACK_COLORS)],
+        "color": TRACK_COLORS[(index * TRACK_COLOR_STEP) % len(TRACK_COLORS)],
         "step_page": 0,     # which 8-step window is being viewed/edited
         # The mod lane: fully independent of the note lane — own length,
         # own division, own step values (0-127 each), edited via the
@@ -158,6 +190,9 @@ class Engine:
         self.mod_lane_active = False    # True: grid is borrowed for the mod-lane bar-graph editor
         self.mod_cursor = 0             # which mod-lane step index the bar graph is showing/editing
 
+        self.color_picker_active = False  # True: grid is borrowed for the color-picker border overlay
+        self.color_picker_track = None    # track index the picked color will be assigned to
+
         self.scale_mode_active = False  # True: encoders 1/2 are Key/Scale for the selected track, the rest blank
         self._key_accum = 0             # accumulated raw encoder delta not yet enough to step Key once
         self._scale_accum = 0           # same, for Scale
@@ -170,7 +205,7 @@ class Engine:
         self.mods = {
             "mute": False, "solo": False,
             "repeat": False, "accent": False,
-            "shift": False,
+            "shift": False, "delete": False,
         }
 
     # -- persistence -----------------------------------------------------
@@ -354,6 +389,27 @@ class Engine:
     def move_mod_cursor(self, delta):
         self.mod_cursor = max(0, min(MAX_STEPS - 1, self.mod_cursor + delta))
 
+    # -- color picker -----------------------------------------------------
+
+    def enter_color_picker(self, track_idx):
+        """Wired to Shift + Screen-bottom N: selects that track (same as a
+        plain Screen-bottom press) and borrows the grid for the
+        color-picker border overlay (see color_picker_grid). Exited only
+        by releasing Shift — see run.py's Shift handling."""
+        self.select_track(track_idx)
+        self.color_picker_active = True
+        self.color_picker_track = track_idx
+
+    def exit_color_picker(self):
+        self.color_picker_active = False
+        self.color_picker_track = None
+
+    def set_track_color(self, color_idx):
+        if self.color_picker_track is None:
+            return
+        if 0 <= self.color_picker_track < len(self.tracks):
+            self.tracks[self.color_picker_track]["color"] = color_idx
+
     def set_mod_division(self, track_idx, div_name):
         if track_idx is None:
             return
@@ -390,6 +446,28 @@ class Engine:
         while self._channel_accum <= -self.KNOB_ACCUM_THRESHOLD:
             self.set_channel(track_idx, -1)
             self._channel_accum += self.KNOB_ACCUM_THRESHOLD
+
+    def enter_sequence(self, doc):
+        """Swaps in a whole different sequence — wired to the Set-button
+        browser's confirm gesture. `doc=None` means "New" (a fresh default
+        pattern); otherwise `doc` is a saved sequence's file contents, run
+        through the normal `load()` clamping. Unlike `load()` alone, this
+        also resets navigation/overlay state (track_page, selected_track,
+        which mode/overlay was open) — loading a totally different pattern
+        can leave any of those pointing past the new pattern's edges or
+        into a mode that no longer makes sense, and stops playback first so
+        the old pattern's notes don't hang."""
+        self.stop()
+        self.doc = default_doc()
+        if doc is not None:
+            self.load(doc)
+        self.track_page = 0
+        self.selected_track = 0
+        self.held_pad = None
+        self.main_selected = False
+        self.mod_lane_active = False
+        self.scale_mode_active = False
+        self.current_param = 0
 
     def add_track(self, duplicate_from=None):
         """Appends a new track (up to MAX_TRACKS) — the only way a track
@@ -515,6 +593,36 @@ class Engine:
             return
         for step in t["steps"]:
             self._nudge_step_param(step, param, delta)
+
+    # param name -> new_step() field, for reset_param below. Same mapping
+    # view.py's _PARAM_FIELD uses for display, duplicated here rather than
+    # imported since engine.py never imports view.py (the reverse is true).
+    _RESET_FIELD = {
+        "velocity": "vel", "gate": "gate", "repeat": "repeat",
+        "probability": "prob", "offset": "offset", "pitch": "note",
+    }
+
+    def reset_param(self, track_idx, step_idx, param):
+        """Snaps one param back to new_step()'s (or, for "channel",
+        new_track()'s) default value — wired to Delete (hold) + touch an
+        encoder. Same step_idx=None-means-every-step convention as
+        nudge_param: a held pad targets just that step, nothing held
+        resets every step on the track."""
+        if track_idx is None or param in NOOP_PARAMS:
+            return
+        t = self.tracks[track_idx]
+        if param == "channel":
+            t["channel"] = new_track(0)["channel"]
+            return
+        field = self._RESET_FIELD.get(param)
+        if field is None:
+            return
+        default_value = new_step()[field]
+        if step_idx is not None and 0 <= step_idx < t["length"]:
+            t["steps"][step_idx][field] = default_value
+            return
+        for step in t["steps"]:
+            step[field] = default_value
 
     @staticmethod
     def _nudge_step_param(step, param, delta):

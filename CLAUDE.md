@@ -111,12 +111,23 @@ in, not rebuilt on every run.
 - **Screen ops** (`text`, `rect`, `header`, …) want the resolved
   `{"R","G","B","A"}` dict — look it up via `view.color(name)` or
   `view.color_by_index(idx)`, never hand-copy an RGB literal.
-- Track colors are restricted to the palette's **"Vivid"** row only
-  (`TRACK_COLORS` in `engine.py`) — bright, distinct hues, no muddy/dark
-  entries. Yellow (index 7) is deliberately excluded from that pool; it
-  and its lighter tint are reserved for the pulsing active-time-division
-  indicator in `view.py`. Don't add yellow back to `TRACK_COLORS`
-  without also reconsidering the division-pulse color.
+- Track colors (`TRACK_COLORS` in `engine.py`) are a hand-picked list,
+  not a mechanical palette-row slice — chosen and ordered from real
+  Push hardware tests for what reads clearly and stays distinct on the
+  small pad LEDs. Don't reorder or regenerate that list without
+  re-testing on hardware. Yellow (index 7) is included: the pulsing
+  active-time-division indicator (`DIV_ACTIVE_HI`/`DIV_ACTIVE_LO` in
+  `view.py`) uses green, not yellow, so there's no clash to avoid.
+- New tracks walk `TRACK_COLORS` with a stride (`TRACK_COLOR_STEP`, see
+  `engine.py`) instead of `index % len(...)`, so adjacent *tracks* don't
+  get adjacent (often visually similar) list entries. Keep the stride
+  coprime with `len(TRACK_COLORS)` if either changes, so every track up
+  to `MAX_TRACKS` still gets a color no other track has.
+- The color-picker overlay (`Engine.enter_color_picker`, Shift +
+  Screen-bottom) paints `TRACK_COLORS` straight, in list order, around
+  the grid's border pads (`COLOR_PICKER_BORDER`/`color_picker_grid` in
+  `engine.py`) — unrelated to the stride above, since a human is picking
+  visually here rather than needing adjacent-track separation.
 
 ## Testing without hardware
 

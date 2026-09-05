@@ -63,8 +63,8 @@ and its own per-step value from 0 to 127. This replaces the earlier v2
 design, where the mod value rode on the note step.
 
 Any `Screen top N` button opens a bar-graph grid overlay. Use it to edit
-the mod lane of the Nth visible track directly. See
-[MANUAL.md](MANUAL.md#mod-lane).
+the mod lane of the Nth visible track directly. (Superseded — see "Mod
+tracks" below.)
 
 Scale quantization (shipped). Quantization happens only at playback
 time. A step's pitch stays stored as a plain semitone offset from the
@@ -208,9 +208,9 @@ again to leave the mode. This replaces the old gesture of holding
 `Scale` and turning any encoder.
 
 You can enter Scale mode only with a specific track selected, not from
-Main mode and not while the mod lane overlay is open. Both of those
-apply to more than one track at once, and Scale mode always applies to a
-single track.
+Main mode. Main mode applies to more than one track at once, and Scale
+mode always applies to a single track. (A Mod track, added later, is
+excluded too — see "Mod tracks" below.)
 
 Scale mode tuning (shipped). The Key and Scale encoders now need an
 accumulated turn (`Engine.KNOB_ACCUM_THRESHOLD = 4`) before they step
@@ -257,7 +257,35 @@ before the fix, once the overlay was open, only `Screen top 8` closed
 it, no matter which track's lane was open or which button opened it.
 See the plan file for more detail.
 
+Mod tracks (shipped). The per-track mod lane is gone, replaced by a
+second *kind* of track: a Mod track is a full step sequencer, same as a
+MIDI track, own column and own grid, whose steps generate modulation
+instead of notes. Its mode (`SEQ`/`LFO`), amount, destination
+(external CC or an internal offset on another track's parameter), and
+(in `LFO` mode) waveform shape are all now genuinely per-track — the old
+mod lane's CC was fixed to CC1 for every track.
+
+The `Note` button (CC50) is reused for a new purpose: it toggles which
+kind of track the 8 columns, Screen-bottom row, and Page Left/Right
+browse. (An earlier version of GridSeq used this button for a
+since-removed drum/melodic per-track toggle — unrelated to today's use.)
+`Add` creates a track of whichever kind is currently being viewed.
+
+`Screen top N` no longer does anything — its only past job, opening the
+mod-lane overlay, is gone. See [MANUAL.md](MANUAL.md#tracks-vs-mod-tracks)
+and [plans/2026-09-02-mod-track-redesign.md](plans/2026-09-02-mod-track-redesign.md).
+
+Mod track tuning (shipped). A fresh pattern now starts with 8 MIDI
+tracks and 8 Mod tracks (not 0). New Mod tracks default to plain white,
+distinct from every `TRACK_COLORS` entry a MIDI track can start with,
+and name themselves "MOD 1", "MOD 2", and so on. Mode and Dest (Amount's
+neighboring columns) now clamp at either end instead of wrapping, the
+same as Key/Scale in Scale mode. Amount is now 0-100, not 0-127. A Mod
+track's internal destination can now be another Mod track, not just a
+MIDI track — its only offsettable parameter in that case is Amount.
+
 v3 candidates (not built):
-- A surface control for mod-lane length, and a per-track mod CC number
-  (both fixed today)
+- Retrigger, offset, and phase for Mod tracks (2 reserved encoder
+  columns leave room for these)
+- A replacement job for the now-unmapped `Screen top N` buttons
 - Pattern slots, or song chaining (v3, from the original plan)

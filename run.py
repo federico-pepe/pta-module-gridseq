@@ -182,26 +182,22 @@ def handle_pad(state, data):
     if t is None:
         return
 
-    if e.mod_lane_active:
-        # Grid is borrowed: column = track's mod lane, row = value bucket
-        # at the current cursor step.
-        snapshot_for_undo(state)
-        e.set_mod_value(track_idx, row)
-        return
-
     # Row 7 (physical top) is the earliest step in the page, row 0
     # (physical bottom) the latest — so the playhead visibly travels
     # top-to-bottom as steps advance, not bottom-to-top.
     step_idx = t["step_page"] * 8 + (7 - row)
 
-    # Mute/Solo + tap live on the Screen-bottom (track-select) buttons,
-    # not here — see handle_button — so a pad tap while either is held
-    # still just toggles the step, same as normal.
-    if e.mods["accent"]:
+    # Accent/Repeat quick-toggles are MIDI-only — a Mod track's steps
+    # don't use those fields (see engine.py's new_step, reused as-is for
+    # "seq" mode's value). Mute/Solo + tap live on the Screen-bottom
+    # (track-select) buttons, not here — see handle_button — so a pad
+    # tap while either is held still just toggles the step, same as
+    # normal.
+    if t["kind"] == "midi" and e.mods["accent"]:
         snapshot_for_undo(state)
         e.toggle_accent(track_idx, step_idx)
         return
-    if e.mods["repeat"]:
+    if t["kind"] == "midi" and e.mods["repeat"]:
         # Quick ratchet toggle, Accent's counterpart: 1 <-> 4 repeats.
         # (The "repeat" encoder already exists, as encoder 3, so holding
         # Repeat no longer needs to bypass anything. This gives the
@@ -220,7 +216,6 @@ def handle_pad(state, data):
 
 
 SCREEN_BOTTOM = {"Screen bottom %d" % n: n - 1 for n in range(1, 9)}
-SCREEN_TOP = {"Screen top %d" % n: n - 1 for n in range(1, 9)}
 
 
 def handle_button(state, data):
@@ -257,10 +252,13 @@ def handle_button(state, data):
         e.transpose_all(12)
     elif name == "Octave Down":
         e.transpose_all(-12)
+    elif name == "Note":
+        e.toggle_view_kind()
+        state.show_popup("VIEW", "MOD TRACKS" if e.view_kind == "mod" else "TRACKS")
     elif name == "Page Left":
         e.track_page = max(0, e.track_page - 8)
     elif name == "Page Right":
-        if e.track_page + 8 < len(e.tracks):
+        if e.track_page + 8 < len(e.visible_track_indices()):
             e.track_page += 8
     elif name == "D-Pad up":
         # Up = backward in time (earlier steps) — rows scroll top-to-
@@ -270,8 +268,6 @@ def handle_button(state, data):
         # not horizontally).
         if state.sequence_browser_active:
             state.sequence_cursor = max(0, state.sequence_cursor - 1)
-        elif e.mod_lane_active:
-            e.move_mod_cursor(-1)
         elif e.mods["shift"]:
             snapshot_for_undo(state)
             t = e.selected()
@@ -285,8 +281,6 @@ def handle_button(state, data):
         if state.sequence_browser_active:
             items_len = 1 + len(state.sequence_names)
             state.sequence_cursor = min(items_len - 1, state.sequence_cursor + 1)
-        elif e.mod_lane_active:
-            e.move_mod_cursor(1)
         elif e.mods["shift"]:
             snapshot_for_undo(state)
             t = e.selected()
@@ -322,36 +316,17 @@ def handle_button(state, data):
             state.undo_snapshot = None
     elif name in eng.DIVISIONS:
         snapshot_for_undo(state)
-        if e.mod_lane_active:
-            e.set_mod_division(e.selected_track, name)
-        else:
-            e.set_division(e.selected_track, name)
+        e.set_division(e.selected_track, name)
     elif name == "Select (main)":
         e.toggle_main()
-    elif name in SCREEN_TOP:
-        # Entry-time gating only. Opening from Track mode works only via
-        # column 8 (the one Mod status button actually on screen there,
-        # see view.draw's Track-mode loop), because columns 1-7 map to
-        # nothing in that mode. In Main mode, and once the overlay is
-        # already open, every column maps to "that column's track". The
-        # overlay itself does not remember which mode opened it, so
-        # closing or switching works the same way regardless: press the
-        # currently-open track's own button to close it, or any other to
-        # jump straight there. See Engine.open_mod_lane and its LED in
-        # view.button_colors, which highlights whichever button closes
-        # the overlay.
-        col = SCREEN_TOP[name]
-        if e.mod_lane_active or e.main_selected:
-            track_idx, t = e.track_at(col)
-            if t is not None:
-                e.open_mod_lane(track_idx)
-        elif col == 7:
-            e.open_mod_lane(e.selected_track)
     elif name in SCREEN_BOTTOM:
         col = SCREEN_BOTTOM[name]
         track_idx, t = e.track_at(col)
         if t is None:
             pass
+        elif e.mods["delete"]:
+            snapshot_for_undo(state)
+            e.remove_track(track_idx)
         elif e.mods["mute"]:
             snapshot_for_undo(state)
             t["muted"] = not t["muted"]
@@ -418,21 +393,19 @@ def handle_encoder(state, data):
             e.nudge_length(e.selected_track, delta)
         return
 
-    if e.mod_lane_active:
-        # Mod-lane mode is exclusive: it borrows the grid and D-Pad, and
-        # every encoder (including the jog wheel) is irrelevant while
-        # it's active — editing happens via pads (set_mod_value) instead.
-        return
-
     if name == "Jog wheel turn":
-        # Only scrolls anything in Main mode: which parameter all 8
-        # columns show and edit. Never touches track selection. Clamps
-        # at either end of ENCODER_PARAMS instead of wrapping — same
-        # "stop at the ends" choice Key/Scale made, for the same reason
-        # (there's no meaningful "next parameter after Mod").
+        # Only scrolls anything in Main mode: which parameter/column all
+        # visible columns show and edit. Never touches track selection.
+        # Clamps at either end instead of wrapping — same "stop at the
+        # ends" choice Key/Scale made. Which list to clamp against
+        # depends on view_kind: MIDI tracks scroll ENCODER_PARAMS, Mod
+        # tracks scroll their own fixed 8 columns.
         if delta and e.main_selected:
             step = 1 if delta > 0 else -1
-            e.current_param = max(0, min(len(eng.ENCODER_PARAMS) - 1, e.current_param + step))
+            if e.view_kind == "mod":
+                e.current_param_mod = max(0, min(7, e.current_param_mod + step))
+            else:
+                e.current_param = max(0, min(len(eng.ENCODER_PARAMS) - 1, e.current_param + step))
         return
 
     if idx is None or idx < 0 or delta == 0:
@@ -445,23 +418,31 @@ def handle_encoder(state, data):
         hcol, hrow = e.held_pad
         h_track_idx, h_t = e.track_at(hcol)
         if h_t is not None:
-            param_name = eng.ENCODER_PARAMS[e.current_param if e.main_selected else idx]
-            if param_name not in eng.NOOP_PARAMS and param_name != "channel":
-                # Same row inversion as handle_pad's step_idx and
-                # pad_colors: row 7 (top) is the earliest step.
-                held_step = h_t["step_page"] * 8 + (7 - hrow)
-                e.nudge_param(h_track_idx, held_step, param_name, delta)
+            # Same row inversion as handle_pad's step_idx and pad_colors:
+            # row 7 (top) is the earliest step.
+            held_step = h_t["step_page"] * 8 + (7 - hrow)
+            if h_t["kind"] == "mod":
+                col = e.current_param_mod if e.main_selected else idx
+                if col == 1 and h_t["mod_mode"] == "seq":
+                    e.nudge_mod_step_value(h_track_idx, held_step, delta)
+            else:
+                param_name = _midi_param_at(e.current_param if e.main_selected else idx)
+                if param_name is not None and param_name != "channel":
+                    e.nudge_param(h_track_idx, held_step, param_name, delta)
         return
 
     if e.main_selected:
         track_idx, t = e.track_at(idx)
         if t is None:
             return
-        param_name = eng.ENCODER_PARAMS[e.current_param]
+        if t["kind"] == "mod":
+            e.nudge_mod_column(track_idx, e.current_param_mod, delta)
+            return
+        param_name = _midi_param_at(e.current_param)
+        if param_name is None:
+            return
         if param_name == "channel":
             e.nudge_channel(track_idx, delta)
-            return
-        if param_name in eng.NOOP_PARAMS:
             return
         e.nudge_param(track_idx, None, param_name, delta)
         return
@@ -469,13 +450,22 @@ def handle_encoder(state, data):
     t = e.selected()
     if t is None:
         return
-    param_name = eng.ENCODER_PARAMS[idx]
+    if t["kind"] == "mod":
+        e.nudge_mod_column(e.selected_track, idx, delta)
+        return
+    param_name = _midi_param_at(idx)
+    if param_name is None:
+        return  # encoder 8 is unused on a MIDI track — see plans/2026-09-02-mod-track-redesign.md
     if param_name == "channel":
         e.nudge_channel(e.selected_track, delta)
         return
-    if param_name in eng.NOOP_PARAMS:
-        return
     e.nudge_param(e.selected_track, None, param_name, delta)
+
+
+def _midi_param_at(idx):
+    if idx is None or not (0 <= idx < len(eng.ENCODER_PARAMS)):
+        return None
+    return eng.ENCODER_PARAMS[idx]
 
 
 _ENCODER_TOUCH_RE = re.compile(r"^Encoder (\d) touch$")
@@ -493,20 +483,22 @@ def handle_touch(state, data):
     e = state.engine
     if not data.get("touched") or not e.mods.get("delete"):
         return
-    if state.sequence_browser_active or e.scale_mode_active or e.mod_lane_active or e.length_view_active:
+    if state.sequence_browser_active or e.scale_mode_active or e.length_view_active:
         return
     m = _ENCODER_TOUCH_RE.match(data.get("name") or "")
     if not m:
         return
     idx = int(m.group(1)) - 1
 
+    # Mod-track params don't have a reset-to-default yet — see plans/
+    # 2026-09-02-mod-track-redesign.md's "Open" section.
     if e.held_pad is not None:
         hcol, hrow = e.held_pad
         h_track_idx, h_t = e.track_at(hcol)
-        if h_t is None:
+        if h_t is None or h_t["kind"] == "mod":
             return
-        param_name = eng.ENCODER_PARAMS[e.current_param if e.main_selected else idx]
-        if param_name in eng.NOOP_PARAMS or param_name == "channel":
+        param_name = _midi_param_at(e.current_param if e.main_selected else idx)
+        if param_name is None or param_name == "channel":
             return
         snapshot_for_undo(state)
         held_step = h_t["step_page"] * 8 + (7 - hrow)
@@ -515,20 +507,20 @@ def handle_touch(state, data):
 
     if e.main_selected:
         track_idx, t = e.track_at(idx)
-        if t is None:
+        if t is None or t["kind"] == "mod":
             return
-        param_name = eng.ENCODER_PARAMS[e.current_param]
-        if param_name in eng.NOOP_PARAMS:
+        param_name = _midi_param_at(e.current_param)
+        if param_name is None:
             return
         snapshot_for_undo(state)
         e.reset_param(track_idx, None, param_name)
         return
 
     t = e.selected()
-    if t is None:
+    if t is None or t["kind"] == "mod":
         return
-    param_name = eng.ENCODER_PARAMS[idx]
-    if param_name in eng.NOOP_PARAMS:
+    param_name = _midi_param_at(idx)
+    if param_name is None:
         return
     snapshot_for_undo(state)
     e.reset_param(e.selected_track, None, param_name)

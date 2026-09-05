@@ -43,7 +43,6 @@ BTN_OFF = 0
 BTN_DIM = 118      # "gray_mid" — visibly lit but low-intensity, for "inactive"
 BTN_FULL = 122     # "lgray"/"white_btn" — full button-white, for "active"
 BTN_GREEN = 126     # Play, while the transport is running
-MOD_LANE_OPEN = 127  # "pure_red" — the open mod lane's Screen top button, signaling "click to exit"
 
 # The active time-division button pulses between these two — vivid bright
 # green and fully off — rather than a single static color, so it's
@@ -85,6 +84,7 @@ BUTTON_CC = {
     "Repeat": 56,
     "Accent": 57,
     "Shift": 49,
+    "Note": 50,
     "Scene 1/4": 36, "Scene 1/4t": 37,
     "Scene 1/8": 38, "Scene 1/8t": 39,
     "Scene 1/16": 40, "Scene 1/16t": 41,
@@ -92,11 +92,9 @@ BUTTON_CC = {
     "Screen bottom 1": 20, "Screen bottom 2": 21, "Screen bottom 3": 22, "Screen bottom 4": 23,
     "Screen bottom 5": 24, "Screen bottom 6": 25, "Screen bottom 7": 26, "Screen bottom 8": 27,
     "Select (main)": 28,
-    # Screen top N opens the mod-lane overlay for the Nth visible track
-    # (Engine.open_mod_lane) — sits directly above that track's column,
-    # including its Mod status-button in Track/Main mode.
-    "Screen top 1": 102, "Screen top 2": 103, "Screen top 3": 104, "Screen top 4": 105,
-    "Screen top 5": 106, "Screen top 6": 107, "Screen top 7": 108, "Screen top 8": 109,
+    # Screen top 1-8 (CC 102-109) are currently unmapped — their old job
+    # (opening the mod lane) is gone, no replacement assigned yet. See
+    # plans/2026-09-02-mod-track-redesign.md's "Open" section.
 }
 
 
@@ -119,7 +117,7 @@ def button_colors(state):
 
     out["Page Left"] = BTN_FULL if held.get("Page Left") else (BTN_DIM if e.track_page > 0 else BTN_OFF)
     out["Page Right"] = BTN_FULL if held.get("Page Right") else (
-        BTN_DIM if e.track_page + 8 < len(e.tracks) else BTN_OFF)
+        BTN_DIM if e.track_page + 8 < len(e.visible_track_indices()) else BTN_OFF)
 
     t = e.selected()
     if state.sequence_browser_active:
@@ -132,13 +130,6 @@ def button_colors(state):
             BTN_DIM if state.sequence_cursor > 0 else BTN_OFF)
         out["D-Pad down"] = BTN_FULL if held.get("D-Pad down") else (
             BTN_DIM if state.sequence_cursor < items_len - 1 else BTN_OFF)
-    elif e.mod_lane_active:
-        # D-Pad moves the mod-lane cursor instead of paging/length — LEDs
-        # reflect room to move the cursor up/down.
-        out["D-Pad up"] = BTN_FULL if held.get("D-Pad up") else (
-            BTN_DIM if e.mod_cursor > 0 else BTN_OFF)
-        out["D-Pad down"] = BTN_FULL if held.get("D-Pad down") else (
-            BTN_DIM if e.mod_cursor < eng.MAX_STEPS - 1 else BTN_OFF)
     elif e.mods.get("shift"):
         # Shift + D-Pad grows/shrinks length instead of paging — LEDs
         # reflect room to shrink/grow, not room to page.
@@ -167,54 +158,34 @@ def button_colors(state):
         out[name] = BTN_FULL if e.mods.get(name.lower()) else BTN_DIM
 
     # Scale is a toggle (Scale mode), not a held modifier — full while
-    # active, off (not just dim) while unavailable (Main mode / mod lane
-    # open, neither of which has a single selected track to apply to).
+    # active, off (not just dim) while unavailable (Main mode, or a
+    # selected Mod track — no pitch concept to apply it to).
     if e.scale_mode_active:
         out["Scale"] = BTN_FULL
-    elif e.main_selected or e.mod_lane_active:
+    elif e.main_selected or (t is not None and t["kind"] == "mod"):
         out["Scale"] = BTN_OFF
     else:
         out["Scale"] = BTN_DIM
 
     # Clip View is a toggle (Length view), same shape as Scale above —
-    # full while active, off while unavailable, dim otherwise.
+    # full while active, off while unavailable, dim otherwise. Available
+    # for a selected Mod track too: it has its own length/step grid.
     if e.length_view_active:
         out["Clip View"] = BTN_FULL
-    elif e.main_selected or e.mod_lane_active:
+    elif e.main_selected:
         out["Clip View"] = BTN_OFF
     else:
         out["Clip View"] = BTN_DIM
 
-    # While mod-lane mode is active, the Scene buttons set the selected
-    # track's mod division instead of its note division — pulse the one
-    # that matches mod_div instead of div.
-    selected_div = (t["mod_div"] if e.mod_lane_active else t["div"]) if t else None
+    selected_div = t["div"] if t else None
     for div_name in eng.DIVISIONS:
         out[div_name] = _pulsing_div_color() if div_name == selected_div else BTN_DIM
 
     out["Select (main)"] = BTN_FULL if e.main_selected else BTN_DIM
 
-    # Screen top N: off by default. These buttons only ever do one thing
-    # (open a Mod button's track's lane), so they light only when a Mod
-    # button is actually on screen for them to sit above, using that Mod
-    # button's own track color instead of a generic dim/full. This
-    # mirrors the Screen-bottom row's "off means no track owns this"
-    # choice, instead of Select (main)'s toggle-style dim/full.
-    # Whichever track's mod lane is currently *open* overrides to bright
-    # red instead, signaling "click to exit". Same button, different job,
-    # once you are inside the overlay it opens.
-    for col in range(8):
-        name = "Screen top %d" % (col + 1)
-        idx, ct = e.track_at(col)
-        if e.mod_lane_active:
-            out[name] = MOD_LANE_OPEN if idx == e.selected_track else BTN_OFF
-        elif e.scale_mode_active or e.length_view_active:
-            out[name] = BTN_OFF
-        elif e.main_selected:
-            shows_mod = ct is not None and eng.ENCODER_PARAMS[e.current_param] == "mod lane"
-            out[name] = ct["color"] if shows_mod else BTN_OFF
-        else:
-            out[name] = t["color"] if (col == 7 and t is not None) else BTN_OFF
+    # Note is a toggle (view_kind), same full/dim shape as Select (main) —
+    # always available, never off.
+    out["Note"] = BTN_FULL if e.view_kind == "mod" else BTN_DIM
 
     # Screen-bottom buttons are black by default. Only the selected
     # track's button lights, in that track's own color. All black while
@@ -231,35 +202,6 @@ def button_colors(state):
     return out
 
 
-def _mod_bucket_index(value):
-    """Highest bucket index whose value is <= the given value — how far
-    up the bar-graph column gets filled for that mod value."""
-    idx = 0
-    for i, b in enumerate(eng.MOD_BUCKETS):
-        if b <= value:
-            idx = i
-    return idx
-
-
-def mod_lane_pad_colors(state):
-    """8x8 grid for the mod-lane bar-graph overlay: column = the visible
-    track's mod lane, rows 0..k lit (k = the cursor step's value's
-    bucket) in that track's color — a filled bar, tallest = loudest.
-    Columns whose track has no step at the current cursor (mod_length <=
-    cursor) are left entirely off."""
-    grid = [[OFF for _ in range(8)] for _ in range(8)]
-    e = state.engine
-    for col in range(8):
-        idx, t = e.track_at(col)
-        if t is None or not (0 <= e.mod_cursor < t["mod_length"]):
-            continue
-        value = t["mod_steps"][e.mod_cursor]
-        top = _mod_bucket_index(value)
-        for row in range(top + 1):
-            grid[row][col] = t["color"]
-    return grid
-
-
 def pad_colors(state):
     """Returns an 8x8 list-of-lists of palette indices, row 0 = bottom
     (matches push3.PadCoord), col 0 = left — one entry per physical pad.
@@ -270,12 +212,10 @@ def pad_colors(state):
     if state.sequence_browser_active:
         # Grid has no meaning while the Set-button browser has the
         # screen — same "borrow the whole surface" exclusivity as the
-        # mod-lane overlay, just with nothing for pads to do at all.
+        # color-picker overlay, just with nothing for pads to do at all.
         return [[OFF for _ in range(8)] for _ in range(8)]
     if e.color_picker_active:
         return color_picker_pad_colors(state)
-    if e.mod_lane_active:
-        return mod_lane_pad_colors(state)
     grid = [[OFF for _ in range(8)] for _ in range(8)]
     for col in range(8):
         idx, t = e.track_at(col)
@@ -312,7 +252,6 @@ def color_picker_pad_colors(state):
 _PARAM_FIELD = {
     "velocity": "vel", "gate": "gate", "repeat": "repeat",
     "probability": "prob", "offset": "offset", "pitch": "note",
-    "mod": "mod",
 }
 
 
@@ -337,7 +276,7 @@ VALUE_SCALE = 2  # Text's "scale" is an integer block-multiplier (nearest-neighb
                  # same bitmap font), not a point size — 2x is the closest whole
                  # step up from the label's 1x while staying on the standard font.
 
-_PARAM_LABEL_OVERRIDES = {"channel": "MIDI Channel", "mod lane": "Mod"}
+_PARAM_LABEL_OVERRIDES = {"channel": "MIDI Channel"}
 
 
 def _param_label(param_name):
@@ -380,9 +319,9 @@ def _param_display_value(t, param_name, held_step=None):
     number is easy to read). With nothing held, fall back to the lo..hi
     range across every step (a compressed "shape" preview). This is the
     same "range narrows to an exact value while editing" pattern
-    _pitch_display_value uses for note names. Callers must special-case
-    "mod lane" themselves (see _mod_button_ops), instead of routing it
-    here, because it renders as a button, not a label/value pair."""
+    _pitch_display_value uses for note names. Mod tracks never call this
+    — see _mod_track_column instead, a completely different column
+    layout."""
     if param_name == "channel":
         return str(t["channel"])
     if param_name not in _PARAM_FIELD:
@@ -422,26 +361,35 @@ def _pitch_display_value(e, t, held_step=None):
 CHAR_W = 7  # basicfont.Face7x13's fixed glyph advance at scale 1 (see internal/renderframe).
             # Width at scale N is CHAR_W * N. Used to center text with no real font metrics.
 
-MOD_BUTTON_Y, MOD_BUTTON_H = 0, 18  # same footprint the removed header row used to occupy — no taller
+def _mod_dest_track_label(e, t):
+    idx = t["mod_dest_track"]
+    if idx is None or not (0 <= idx < len(e.tracks)):
+        return "-"
+    return e.tracks[idx]["name"]
 
 
-def _mod_button_ops(x, col_w, c):
-    """The "Mod" column's status page (Track/Main mode only, not the
-    mod-lane editor overlay itself) renders as a colored button tile,
-    instead of a label/value pair. There is no single meaningful value
-    to show, because a mod lane holds a whole lane's worth of steps, and
-    "n/a" was just noise. How to actually visualize the lane here is
-    still an open question. This tile is a placeholder that at least
-    does not waste the space or lie. The ">" hints at another page of
-    settings behind it, the mod-lane overlay, opened via the "Screen top
-    N" button above this column."""
-    black = color("off")
-    baseline = MOD_BUTTON_Y + 14
-    return [
-        {"kind": "rect", "params": {"x": x + 4, "y": MOD_BUTTON_Y, "w": col_w - 8, "h": MOD_BUTTON_H, "c": c}},
-        {"kind": "text", "params": {"x": x + 10, "baseline": baseline, "s": "Mod", "c": black}},
-        {"kind": "text", "params": {"x": x + col_w - 16, "baseline": baseline, "s": ">", "c": black}},
-    ]
+def _mod_track_column(e, t, col):
+    """One of a Mod track's 8 fixed encoder columns — see engine.py's
+    comment above MOD_MODES for the layout. Columns 3/4 change meaning
+    with mod_dest_type; column 5 is blank in "seq" mode (no waveform to
+    pick a shape for)."""
+    if col == 0:
+        return "Mode", t["mod_mode"].upper()
+    if col == 1:
+        return "Amount", str(t["mod_amount"])
+    if col == 2:
+        return "Dest", "EXT" if t["mod_dest_type"] == "external" else "INT"
+    if col == 3:
+        if t["mod_dest_type"] == "external":
+            return "CC", str(t["mod_cc"])
+        return "Trk", _mod_dest_track_label(e, t)
+    if col == 4:
+        if t["mod_dest_type"] == "external":
+            return "MIDI Channel", str(t["channel"])
+        return "Param", t["mod_dest_param"].capitalize()
+    if col == 5:
+        return "Shape", t["mod_lfo_shape"].upper() if t["mod_mode"] == "lfo" else "-"
+    return "-", ""
 
 
 SEQ_LIST_X = 20
@@ -520,43 +468,48 @@ def draw(state):
             c = color_by_index(t["color"])
             ops.append({"kind": "text", "params": {"x": 4, "baseline": PARAM_LABEL_BASELINE, "s": "Length", "c": c}})
             ops.append(_value_op(4, PARAM_VALUE_BASELINE, str(t["length"]), c))
-    elif e.mod_lane_active:
-        # Mod-lane mode: columns = tracks' mod lanes (same as always).
-        # Label = that track's own mod division (independent per track).
-        # Value = its mod value at the shared cursor step, or "-" if that
-        # track's lane does not reach the cursor yet.
-        for col in range(8):
-            idx, t = e.track_at(col)
-            x = col * col_w
-            if t is None:
-                continue
-            c = color_by_index(t["color"])
-            label = "S%d %s" % (e.mod_cursor + 1, t["mod_div"].replace("Scene ", ""))
-            value = str(t["mod_steps"][e.mod_cursor]) if e.mod_cursor < t["mod_length"] else "-"
-            ops.append({"kind": "text", "params": {"x": x + 4, "baseline": PARAM_LABEL_BASELINE, "s": label, "c": c}})
-            ops.append(_value_op(x + 4, PARAM_VALUE_BASELINE, value, c))
     elif e.main_selected:
-        # Columns = tracks, every one showing the *same* parameter
-        # (eng.current_param, picked by the jog wheel) — so all 8 values
-        # are directly comparable, and the label is the same in every
-        # column (there's only one parameter active).
-        param_name = eng.ENCODER_PARAMS[e.current_param]
-        label = _param_label(param_name)
+        # Columns = tracks (view_kind-filtered), every one showing the
+        # *same* parameter/column — so all values are directly
+        # comparable, and the label is the same in every column. Which
+        # cursor (current_param vs current_param_mod) and which column
+        # meaning depends on view_kind, since Mod and MIDI tracks never
+        # appear together in Main mode.
         held_idx, held_step = _held_step(e)
+        if e.view_kind == "mod":
+            for col in range(8):
+                idx, t = e.track_at(col)
+                x = col * col_w
+                if t is None:
+                    continue
+                c = color_by_index(t["color"])
+                label, value = _mod_track_column(e, t, e.current_param_mod)
+                ops.append({"kind": "text", "params": {"x": x + 4, "baseline": PARAM_LABEL_BASELINE, "s": label, "c": c}})
+                ops.append(_value_op(x + 4, PARAM_VALUE_BASELINE, value, c))
+        else:
+            param_name = eng.ENCODER_PARAMS[e.current_param]
+            label = _param_label(param_name)
+            for col in range(8):
+                idx, t = e.track_at(col)
+                x = col * col_w
+                if t is None:
+                    continue
+                c = color_by_index(t["color"])
+                this_held_step = held_step if idx == held_idx else None
+                if param_name == "pitch":
+                    value = _pitch_display_value(e, t, this_held_step)
+                else:
+                    value = _param_display_value(t, param_name, this_held_step)
+                ops.append({"kind": "text", "params": {"x": x + 4, "baseline": PARAM_LABEL_BASELINE, "s": label, "c": c}})
+                ops.append(_value_op(x + 4, PARAM_VALUE_BASELINE, value, c))
+    elif e.selected() is not None and e.selected()["kind"] == "mod":
+        # Columns = the selected Mod track's own 8 fixed columns (mode,
+        # amount, dest, ...) — see _mod_track_column.
+        t = e.selected()
+        c = color_by_index(t["color"])
         for col in range(8):
-            idx, t = e.track_at(col)
             x = col * col_w
-            if t is None:
-                continue
-            c = color_by_index(t["color"])
-            if param_name == "mod lane":
-                ops.extend(_mod_button_ops(x, col_w, c))
-                continue
-            this_held_step = held_step if idx == held_idx else None
-            if param_name == "pitch":
-                value = _pitch_display_value(e, t, this_held_step)
-            else:
-                value = _param_display_value(t, param_name, this_held_step)
+            label, value = _mod_track_column(e, t, col)
             ops.append({"kind": "text", "params": {"x": x + 4, "baseline": PARAM_LABEL_BASELINE, "s": label, "c": c}})
             ops.append(_value_op(x + 4, PARAM_VALUE_BASELINE, value, c))
     else:
@@ -566,12 +519,11 @@ def draw(state):
         held_idx, held_step = _held_step(e)
         this_held_step = held_step if held_idx == e.selected_track else None
         for col in range(8):
-            param_name = eng.ENCODER_PARAMS[col]
+            param_name = eng.ENCODER_PARAMS[col] if col < len(eng.ENCODER_PARAMS) else None
             x = col * col_w
             c = color_by_index(t["color"]) if t is not None else gray
-            if param_name == "mod lane":
-                ops.extend(_mod_button_ops(x, col_w, c))
-                continue
+            if param_name is None:
+                continue  # encoder 8 is unused on a MIDI track
             label = _param_label(param_name)
             if t is None:
                 value = "n/a"

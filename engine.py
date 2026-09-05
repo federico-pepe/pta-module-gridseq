@@ -8,9 +8,10 @@ index for all lanes. Here, each Track runs its own time division and
 keeps its own step position.
 """
 
+import math
 import time
 
-MAX_TRACKS = 16          # 2 pages of 8 columns
+MAX_TRACKS = 32          # 2 pages of 8 columns
 DEFAULT_TRACK_COUNT = 8
 DEFAULT_STEPS = 8
 MAX_STEPS = 64
@@ -73,28 +74,45 @@ SCALE_LABELS = {
     "dorian_sharp4": "Dorian #4",
 }
 
-# The 8 parameters, in encoder order. "Encoder index N" means:
+# The 7 MIDI-track parameters, in encoder order (encoders 1-7 — encoder 8
+# is unused on a MIDI track, see plans/2026-09-02-mod-track-redesign.md).
+# "Encoder index N" means:
 #   - A track is selected (main_selected False): encoder N always edits
-#     ENCODER_PARAMS[N] of that track. Fixed 1:1 mapping, all 8
+#     ENCODER_PARAMS[N] of that track. Fixed 1:1 mapping, all 7
 #     parameters live at once, no paging.
-#   - Main mode (main_selected True): all 8 encoders edit the *same*
-#     parameter, ENCODER_PARAMS[current_param], one encoder per track
-#     (encoder N -> the Nth visible track). The jog wheel picks which
-#     parameter all 8 show, by scrolling current_param.
+#   - Main mode (main_selected True): all visible encoders edit the
+#     *same* parameter, ENCODER_PARAMS[current_param], one encoder per
+#     track (encoder N -> the Nth visible track). The jog wheel picks
+#     which parameter all columns show, by scrolling current_param.
 # "channel" is track-level, not per-step (see set_channel). With no pad
 # held, turning it changes the track's MIDI channel. A held pad has
-# nothing to target, so it does nothing there (see NOOP_PARAMS in
-# run.py's held-pad branch). "mod lane" is a status page only: it shows
-# the track's mod-lane division. Actual mod-lane editing happens in the
-# grid overlay (mod_lane_active below), not via this encoder. Turning it
-# does nothing, held pad or not.
-ENCODER_PARAMS = ["velocity", "gate", "repeat", "probability", "offset", "pitch", "channel", "mod lane"]
-NOOP_PARAMS = ("mod lane",)
+# nothing to target, so it does nothing there.
+ENCODER_PARAMS = ["velocity", "gate", "repeat", "probability", "offset", "pitch", "channel"]
 
-# Bucket values (0-127) for the mod-lane bar-graph editor's 8 rows. Row 0
-# (bottom, same convention as the note grid) is the lowest bucket, row 7
-# the highest.
-MOD_BUCKETS = [round(i * 127 / 7) for i in range(8)]
+# A Mod track's 8 encoder columns are fixed slots, not named params from
+# a list like ENCODER_PARAMS — columns 3/4's meaning depends on
+# mod_dest_type. See Engine.nudge_mod_column and view._mod_track_column
+# for the one place each column's meaning is defined:
+#   0 mode, 1 amount, 2 dest type,
+#   3 CC (external) / dest track (internal),
+#   4 MIDI channel (external) / dest param (internal),
+#   5 LFO shape (no-op in seq mode), 6-7 reserved for future
+#   retrigger/offset/phase.
+MOD_MODES = ("seq", "lfo")
+MOD_DEST_TYPES = ("external", "internal")
+MOD_LFO_SHAPES = ("triangle", "sine", "saw", "square")
+MOD_DEST_PARAMS = ["velocity", "gate", "probability", "offset", "pitch"]  # MIDI-track destinations
+MOD_DEST_PARAMS_MOD = ["amount"]  # Mod-track destinations — just Amount for now
+MOD_COMBINE_MODES = ("offset_additive",)  # only mode that ships; see plan's "Open"
+TRACK_KINDS = ("midi", "mod")
+
+# Valid range for each parameter a Mod track can offset internally —
+# used to clamp the combined (base + mod) value the same way a step's
+# own value is already clamped in _nudge_step_param.
+MOD_PARAM_RANGE = {
+    "velocity": (1, 127), "gate": (2, 99), "probability": (0, 100),
+    "offset": (-45, 45), "pitch": (-127, 127), "amount": (0, 100),
+}
 
 # Palette indices (core/push3.Palette, see palette.json) for track
 # colors, cycled across DEFAULT_TRACK_COUNT+ tracks. Hand-picked on real
@@ -113,6 +131,14 @@ TRACK_COLORS = [1, 2, 3, 4, 6, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 1
 # before it repeats. Every track up to MAX_TRACKS (16) gets a color no
 # other track has.
 TRACK_COLOR_STEP = 3
+
+# Mod tracks default to plain white (palette "white", the same index
+# pad LEDs use for bright-white — see palette.json), not a TRACK_COLORS
+# entry — keeps them visually distinct from MIDI tracks at a glance.
+# Still changeable via the color picker like any other track.
+MOD_TRACK_DEFAULT_COLOR = 120
+
+DEFAULT_MOD_TRACK_COUNT = 8
 
 # The color-picker overlay (Shift + Screen-bottom, see Engine.enter_color_
 # picker) paints TRACK_COLORS around the grid's border pads, one color per
@@ -154,10 +180,10 @@ def new_step():
 def new_track(index):
     return {
         "name": "Track %d" % (index + 1),
+        "kind": "midi",     # "midi" or "mod" — see TRACK_KINDS
         "channel": 1,
         "root": 60,
         "scale": "chromatic",
-        "mod_cc": 1,        # CC1 = mod wheel. Fixed, not yet per-track configurable.
         "div": DEFAULT_DIV,
         "muted": False,
         "solo": False,
@@ -165,27 +191,40 @@ def new_track(index):
         "steps": [new_step() for _ in range(DEFAULT_STEPS)],
         "color": TRACK_COLORS[(index * TRACK_COLOR_STEP) % len(TRACK_COLORS)],
         "step_page": 0,     # which 8-step window is being viewed/edited
-        # The mod lane: fully independent of the note lane — own length,
-        # own division, own step values (0-127 each), edited via the
-        # mod-lane grid overlay (Engine.mod_lane_active), not per-step
-        # note editing. Fires send_cc(channel, mod_cc, value) on its own
-        # schedule whenever a step's value is > 0.
-        "mod_length": DEFAULT_STEPS,
-        "mod_div": DEFAULT_DIV,
-        "mod_steps": [0 for _ in range(DEFAULT_STEPS)],
+        # Mod-track-only fields below. Present but inert on a "midi" track,
+        # same as "root"/"scale" being inert on a "mod" track — one dict
+        # shape for both kinds keeps load()/to_doc()/add_track generic.
+        "mod_mode": "seq",           # "seq": plays its own step grid as a value lane.
+                                      # "lfo": free-runs a waveform, steps just retrigger it.
+        "mod_amount": 100,           # 0-100 depth applied to the raw output
+        "mod_dest_type": "external",  # "external": sends a MIDI CC. "internal": offsets
+                                       # another track's parameter.
+        "mod_cc": 1,                 # external dest: which CC to send, on this track's channel
+        "mod_dest_track": None,      # internal dest: target track index
+        "mod_dest_param": MOD_DEST_PARAMS[0],  # internal dest: which parameter to offset
+        "mod_lfo_shape": "triangle",
+        "mod_combine": "offset_additive",  # only mode that ships — see MOD_COMBINE_MODES
         # Runtime-only fields below. Harmless to persist, ignored on load if stale.
         "_pos": 0.0,        # wall-clock track beat position at last resync
         "_current_step": -1,
         "_ext_acc": 0,      # external-clock tick accumulator for this track
-        "_mod_current_step": -1,
-        "_mod_ext_acc": 0,  # external-clock tick accumulator for the mod lane
+        "_mod_seq_value": 0,   # "seq" mode: last value written by an "on" step, held until the next one
+        "_lfo_anchor": 0.0,    # "lfo" mode: time.monotonic() at the last phase reset (retrigger or play start)
+        "_mod_last_sent": None,  # external dest: last CC value actually sent, to avoid resending unchanged values
     }
 
 
 def default_pattern():
+    tracks = [new_track(i) for i in range(DEFAULT_TRACK_COUNT)]
+    for i in range(DEFAULT_MOD_TRACK_COUNT):
+        t = new_track(DEFAULT_TRACK_COUNT + i)
+        t["kind"] = "mod"
+        t["name"] = "MOD %d" % (i + 1)
+        t["color"] = MOD_TRACK_DEFAULT_COLOR
+        tracks.append(t)
     return {
         "bpm": DEFAULT_BPM,
-        "tracks": [new_track(i) for i in range(DEFAULT_TRACK_COUNT)],
+        "tracks": tracks,
     }
 
 
@@ -209,13 +248,19 @@ class Engine:
 
         self.track_page = 0             # which 8-column track window is visible
         self.selected_track = 0
+        self.view_kind = "midi"         # "midi" or "mod" — which kind of track the columns/paging/select browse.
+                                         # Toggled by the Note button. See visible_track_indices/track_at.
 
         self.held_pad = None            # (col, row) of the currently-held pad, or None
         self.main_selected = False      # True: the 8 columns are tracks, all showing one shared parameter
-        self.current_param = 0          # index into ENCODER_PARAMS. Only meaningful in Main mode, set by the jog wheel.
+        self.current_param = 0          # index into ENCODER_PARAMS (view_kind "midi"). Set by the jog wheel in Main mode.
+        self.current_param_mod = 0      # same, but the 0-7 Mod-track column index (view_kind "mod")
 
-        self.mod_lane_active = False    # True: grid is borrowed for the mod-lane bar-graph editor
-        self.mod_cursor = 0             # which mod-lane step index the bar graph is showing/editing
+        self._mod_mode_accum = 0
+        self._mod_dest_type_accum = 0
+        self._mod_lfo_shape_accum = 0
+        self._mod_dest_track_accum = 0
+        self._mod_dest_param_accum = 0
 
         self.color_picker_active = False  # True: grid is borrowed for the color-picker border overlay
         self.color_picker_track = None    # track index the picked color will be assigned to
@@ -265,14 +310,23 @@ class Engine:
                 filled.append(s)
             t["steps"] = filled
 
-            mod_length = max(1, min(MAX_STEPS, int(t.get("mod_length", DEFAULT_STEPS))))
-            t["mod_length"] = mod_length
-            mod_steps = saved.get("mod_steps") or []
-            filled_mod = []
-            for j in range(mod_length):
-                v = mod_steps[j] if j < len(mod_steps) and isinstance(mod_steps[j], (int, float)) else 0
-                filled_mod.append(max(0, min(127, int(v))))
-            t["mod_steps"] = filled_mod
+            if t["kind"] not in TRACK_KINDS:
+                t["kind"] = "midi"
+            if t["mod_mode"] not in MOD_MODES:
+                t["mod_mode"] = "seq"
+            if t["mod_dest_type"] not in MOD_DEST_TYPES:
+                t["mod_dest_type"] = "external"
+            if t["mod_lfo_shape"] not in MOD_LFO_SHAPES:
+                t["mod_lfo_shape"] = "triangle"
+            if t["mod_combine"] not in MOD_COMBINE_MODES:
+                t["mod_combine"] = "offset_additive"
+            if t["mod_dest_param"] not in MOD_DEST_PARAMS and t["mod_dest_param"] not in MOD_DEST_PARAMS_MOD:
+                t["mod_dest_param"] = MOD_DEST_PARAMS[0]
+            if not isinstance(t["mod_dest_track"], int) or t["mod_dest_track"] == i or \
+                    not (0 <= t["mod_dest_track"] < MAX_TRACKS):
+                t["mod_dest_track"] = None
+            t["mod_amount"] = max(0, min(100, int(t.get("mod_amount", 100))))
+            t["mod_cc"] = max(0, min(127, int(t.get("mod_cc", 1))))
 
             tracks.append(t)
         if tracks:
@@ -293,11 +347,35 @@ class Engine:
     def tracks(self):
         return self.doc["pattern"]["tracks"]
 
+    def visible_track_indices(self):
+        """Absolute track indices whose kind matches view_kind, in order —
+        what the 8 grid columns / Screen-bottom row / Page Left-Right
+        actually browse. See track_at."""
+        return [i for i, t in enumerate(self.tracks) if t["kind"] == self.view_kind]
+
+    def _tracks_of_kind(self, kind):
+        return [i for i, t in enumerate(self.tracks) if t["kind"] == kind]
+
     def track_at(self, col):
-        idx = self.track_page + col
-        if 0 <= idx < len(self.tracks):
+        visible = self.visible_track_indices()
+        pos = self.track_page + col
+        if 0 <= pos < len(visible):
+            idx = visible[pos]
             return idx, self.tracks[idx]
         return None, None
+
+    def toggle_view_kind(self):
+        """Wired to the Note button (CC50): flips which kind of track the
+        columns/paging/select browse. Resets navigation the same way
+        enter_sequence does, because the old selection/page can point
+        past the new kind's visible tracks."""
+        self.view_kind = "mod" if self.view_kind == "midi" else "midi"
+        self.track_page = 0
+        self.main_selected = False
+        self.scale_mode_active = False
+        self.length_view_active = False
+        visible = self.visible_track_indices()
+        self.selected_track = visible[0] if visible else 0
 
     def selected(self):
         if 0 <= self.selected_track < len(self.tracks):
@@ -331,10 +409,6 @@ class Engine:
         beats_per_step = DIVISIONS.get(track["div"], DIVISIONS[DEFAULT_DIV])
         return (60.0 / max(1, bpm)) * beats_per_step
 
-    def mod_step_duration(self, track, bpm):
-        beats_per_step = DIVISIONS.get(track["mod_div"], DIVISIONS[DEFAULT_DIV])
-        return (60.0 / max(1, bpm)) * beats_per_step
-
     # -- transport -----------------------------------------------------
 
     def toggle_play(self):
@@ -349,15 +423,15 @@ class Engine:
         for t in self.tracks:
             t["_current_step"] = -1
             t["_ext_acc"] = 0
-            t["_mod_current_step"] = -1
-            t["_mod_ext_acc"] = 0
+            t["_mod_seq_value"] = 0
+            t["_lfo_anchor"] = self.play_start
+            t["_mod_last_sent"] = None
 
     def stop(self):
         self.playing = False
         self._release_all_pending(time.monotonic())
         for t in self.tracks:
             t["_current_step"] = -1
-            t["_mod_current_step"] = -1
 
     # -- pad / step editing -----------------------------------------------------
 
@@ -402,26 +476,151 @@ class Engine:
         if t["step_page"] > last_page:
             t["step_page"] = last_page
 
-    # -- mod lane -----------------------------------------------------
+    # -- mod track params -----------------------------------------------------
 
-    def open_mod_lane(self, track_idx):
-        """Wired to every "Screen top N" button. Selects that column's
-        track and opens the mod-lane overlay for it. A second press on
-        the button for the *same*, already-open track closes the overlay
-        (a plain toggle). Pressing a different track's button while the
-        overlay is open jumps straight to that track, instead of closing
-        first. Closing only happens by pressing the button of the track
-        that is currently open."""
-        if self.mod_lane_active and self.selected_track == track_idx:
-            self.mod_lane_active = False
-        else:
-            self.select_track(track_idx)
-            self.mod_lane_active = True
-            self.scale_mode_active = False  # exclusive with the mod lane overlay
-            self.length_view_active = False  # same
+    def nudge_mod_step_value(self, track_idx, step_idx, delta):
+        """Held-pad editing on a "seq"-mode Mod track's own grid: the
+        Amount column (column 1) edits that one step's stored value
+        instead of the track's overall mod_amount depth — same shape as
+        a MIDI track's velocity column, just 0-127 rather than 1-127
+        since a Mod step can validly hold zero."""
+        t = self.tracks[track_idx]
+        if 0 <= step_idx < t["length"]:
+            t["steps"][step_idx]["vel"] = max(0, min(127, t["steps"][step_idx]["vel"] + delta))
 
-    def move_mod_cursor(self, delta):
-        self.mod_cursor = max(0, min(MAX_STEPS - 1, self.mod_cursor + delta))
+    def nudge_mod_amount(self, track_idx, delta):
+        t = self.tracks[track_idx]
+        t["mod_amount"] = max(0, min(100, t["mod_amount"] + delta))
+
+    def nudge_mod_cc(self, track_idx, delta):
+        t = self.tracks[track_idx]
+        t["mod_cc"] = max(0, min(127, t["mod_cc"] + delta))
+
+    def cycle_mod_mode(self, track_idx, forward=True):
+        # Clamps, does not wrap — same "stop at the ends" choice as
+        # cycle_scale/cycle_key, so turning past SEQ or LFO does nothing
+        # instead of jumping to the other end.
+        t = self.tracks[track_idx]
+        i = MOD_MODES.index(t["mod_mode"])
+        i = max(0, min(len(MOD_MODES) - 1, i + (1 if forward else -1)))
+        t["mod_mode"] = MOD_MODES[i]
+
+    def nudge_mod_mode(self, track_idx, delta):
+        self._mod_mode_accum += delta
+        while self._mod_mode_accum >= self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_mode(track_idx, True)
+            self._mod_mode_accum -= self.KNOB_ACCUM_THRESHOLD
+        while self._mod_mode_accum <= -self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_mode(track_idx, False)
+            self._mod_mode_accum += self.KNOB_ACCUM_THRESHOLD
+
+    def cycle_mod_dest_type(self, track_idx, forward=True):
+        # Clamps, does not wrap — see cycle_mod_mode.
+        t = self.tracks[track_idx]
+        i = MOD_DEST_TYPES.index(t["mod_dest_type"])
+        i = max(0, min(len(MOD_DEST_TYPES) - 1, i + (1 if forward else -1)))
+        t["mod_dest_type"] = MOD_DEST_TYPES[i]
+
+    def nudge_mod_dest_type(self, track_idx, delta):
+        self._mod_dest_type_accum += delta
+        while self._mod_dest_type_accum >= self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_dest_type(track_idx, True)
+            self._mod_dest_type_accum -= self.KNOB_ACCUM_THRESHOLD
+        while self._mod_dest_type_accum <= -self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_dest_type(track_idx, False)
+            self._mod_dest_type_accum += self.KNOB_ACCUM_THRESHOLD
+
+    def cycle_mod_lfo_shape(self, track_idx, forward=True):
+        t = self.tracks[track_idx]
+        i = MOD_LFO_SHAPES.index(t["mod_lfo_shape"])
+        t["mod_lfo_shape"] = MOD_LFO_SHAPES[(i + (1 if forward else -1)) % len(MOD_LFO_SHAPES)]
+
+    def nudge_mod_lfo_shape(self, track_idx, delta):
+        self._mod_lfo_shape_accum += delta
+        while self._mod_lfo_shape_accum >= self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_lfo_shape(track_idx, True)
+            self._mod_lfo_shape_accum -= self.KNOB_ACCUM_THRESHOLD
+        while self._mod_lfo_shape_accum <= -self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_lfo_shape(track_idx, False)
+            self._mod_lfo_shape_accum += self.KNOB_ACCUM_THRESHOLD
+
+    def cycle_mod_dest_track(self, track_idx, forward=True):
+        """Cycles mod_dest_track among every *other* track — MIDI or Mod.
+        A Mod track can modulate another Mod track (for example, one
+        LFO's rate-of-change driving another's Amount), just not itself.
+        Resets mod_dest_param if it doesn't apply to the new
+        destination's kind (see _mod_dest_param_options)."""
+        t = self.tracks[track_idx]
+        candidates = [i for i in range(len(self.tracks)) if i != track_idx]
+        if not candidates:
+            t["mod_dest_track"] = None
+            return
+        cur = t["mod_dest_track"]
+        i = candidates.index(cur) if cur in candidates else (-1 if forward else len(candidates))
+        i = max(0, min(len(candidates) - 1, i + (1 if forward else -1)))
+        t["mod_dest_track"] = candidates[i]
+        options = self._mod_dest_param_options(track_idx)
+        if t["mod_dest_param"] not in options:
+            t["mod_dest_param"] = options[0]
+
+    def nudge_mod_dest_track(self, track_idx, delta):
+        self._mod_dest_track_accum += delta
+        while self._mod_dest_track_accum >= self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_dest_track(track_idx, True)
+            self._mod_dest_track_accum -= self.KNOB_ACCUM_THRESHOLD
+        while self._mod_dest_track_accum <= -self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_dest_track(track_idx, False)
+            self._mod_dest_track_accum += self.KNOB_ACCUM_THRESHOLD
+
+    def _mod_dest_param_options(self, track_idx):
+        """Which param list applies depends on the destination track's
+        kind — a Mod track has no velocity/gate/pitch to offset, only
+        its own Amount."""
+        t = self.tracks[track_idx]
+        dest = t["mod_dest_track"]
+        if dest is not None and 0 <= dest < len(self.tracks) and self.tracks[dest]["kind"] == "mod":
+            return MOD_DEST_PARAMS_MOD
+        return MOD_DEST_PARAMS
+
+    def cycle_mod_dest_param(self, track_idx, forward=True):
+        t = self.tracks[track_idx]
+        options = self._mod_dest_param_options(track_idx)
+        i = options.index(t["mod_dest_param"]) if t["mod_dest_param"] in options else 0
+        i = max(0, min(len(options) - 1, i + (1 if forward else -1)))
+        t["mod_dest_param"] = options[i]
+
+    def nudge_mod_dest_param(self, track_idx, delta):
+        self._mod_dest_param_accum += delta
+        while self._mod_dest_param_accum >= self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_dest_param(track_idx, True)
+            self._mod_dest_param_accum -= self.KNOB_ACCUM_THRESHOLD
+        while self._mod_dest_param_accum <= -self.KNOB_ACCUM_THRESHOLD:
+            self.cycle_mod_dest_param(track_idx, False)
+            self._mod_dest_param_accum += self.KNOB_ACCUM_THRESHOLD
+
+    def nudge_mod_column(self, track_idx, col, delta):
+        """Dispatches one of a Mod track's 8 Track-mode encoder columns —
+        see MOD_MODES's comment above ENCODER_PARAMS for the fixed column
+        layout. Columns 6-7 are reserved (no-op) for now."""
+        t = self.tracks[track_idx]
+        if col == 0:
+            self.nudge_mod_mode(track_idx, delta)
+        elif col == 1:
+            self.nudge_mod_amount(track_idx, delta)
+        elif col == 2:
+            self.nudge_mod_dest_type(track_idx, delta)
+        elif col == 3:
+            if t["mod_dest_type"] == "external":
+                self.nudge_mod_cc(track_idx, delta)
+            else:
+                self.nudge_mod_dest_track(track_idx, delta)
+        elif col == 4:
+            if t["mod_dest_type"] == "external":
+                self.nudge_channel(track_idx, delta)
+            else:
+                self.nudge_mod_dest_param(track_idx, delta)
+        elif col == 5:
+            self.nudge_mod_lfo_shape(track_idx, delta)
 
     # -- color picker -----------------------------------------------------
 
@@ -443,23 +642,6 @@ class Engine:
             return
         if 0 <= self.color_picker_track < len(self.tracks):
             self.tracks[self.color_picker_track]["color"] = color_idx
-
-    def set_mod_division(self, track_idx, div_name):
-        if track_idx is None:
-            return
-        t = self.tracks[track_idx]
-        if div_name in DIVISIONS:
-            t["mod_div"] = div_name
-
-    def set_mod_value(self, track_idx, row):
-        """Tapping row `row` (0=bottom..7=top) in a mod-lane column sets
-        that track's mod value at the current cursor step to that row's
-        bucket. No-op if the cursor is past that track's own mod_length."""
-        t = self.tracks[track_idx]
-        if not (0 <= self.mod_cursor < t["mod_length"]):
-            return
-        if 0 <= row < len(MOD_BUCKETS):
-            t["mod_steps"][self.mod_cursor] = MOD_BUCKETS[row]
 
     def set_channel(self, track_idx, delta):
         """Track-level, not per-step — one MIDI channel (1-16) per whole
@@ -498,12 +680,13 @@ class Engine:
             self.load(doc)
         self.track_page = 0
         self.selected_track = 0
+        self.view_kind = "midi"
         self.held_pad = None
         self.main_selected = False
-        self.mod_lane_active = False
         self.scale_mode_active = False
         self.length_view_active = False
         self.current_param = 0
+        self.current_param_mod = 0
 
     def add_track(self, duplicate_from=None):
         """Appends a new track (up to MAX_TRACKS) — the only way a track
@@ -514,7 +697,12 @@ class Engine:
             return False
         idx = len(self.tracks)
         t = new_track(idx)
-        if duplicate_from is not None and 0 <= duplicate_from < len(self.tracks):
+        t["kind"] = self.view_kind
+        if t["kind"] == "mod":
+            t["name"] = "MOD %d" % (len(self._tracks_of_kind("mod")) + 1)
+            t["color"] = MOD_TRACK_DEFAULT_COLOR
+        if duplicate_from is not None and 0 <= duplicate_from < len(self.tracks) and \
+                self.tracks[duplicate_from]["kind"] == self.view_kind:
             src = self.tracks[duplicate_from]
             t["channel"] = src["channel"]
             t["div"] = src["div"]
@@ -522,10 +710,47 @@ class Engine:
             t["scale"] = src["scale"]
             t["length"] = src["length"]
             t["steps"] = [dict(s) for s in src["steps"]]
-            t["mod_length"] = src["mod_length"]
-            t["mod_div"] = src["mod_div"]
-            t["mod_steps"] = list(src["mod_steps"])
+            if t["kind"] == "mod":
+                t["mod_mode"] = src["mod_mode"]
+                t["mod_amount"] = src["mod_amount"]
+                t["mod_dest_type"] = src["mod_dest_type"]
+                t["mod_cc"] = src["mod_cc"]
+                t["mod_dest_track"] = src["mod_dest_track"]
+                t["mod_dest_param"] = src["mod_dest_param"]
+                t["mod_lfo_shape"] = src["mod_lfo_shape"]
+                t["mod_combine"] = src["mod_combine"]
         self.tracks.append(t)
+        return True
+
+    def remove_track(self, track_idx):
+        """Wired to Delete (hold) + a track's Screen-bottom button — works
+        on either kind of track. Refuses to remove the last track left in
+        the whole pool (not just the last of one kind — an empty Mod view
+        is fine, an entirely empty pool is not). Every other Mod track's
+        mod_dest_track is reindexed to follow the shift, or cleared if it
+        pointed at the removed track."""
+        if track_idx is None or not (0 <= track_idx < len(self.tracks)):
+            return False
+        if len(self.tracks) <= 1:
+            return False
+        del self.tracks[track_idx]
+        for t in self.tracks:
+            dest = t["mod_dest_track"]
+            if dest is None:
+                continue
+            if dest == track_idx:
+                t["mod_dest_track"] = None
+            elif dest > track_idx:
+                t["mod_dest_track"] = dest - 1
+        if self.selected_track > track_idx:
+            self.selected_track -= 1
+        elif self.selected_track >= len(self.tracks):
+            self.selected_track = len(self.tracks) - 1
+        self.track_page = 0
+        self.held_pad = None
+        visible = self.visible_track_indices()
+        if self.selected_track not in visible:
+            self.selected_track = visible[0] if visible else 0
         return True
 
     def cycle_scale(self, track_idx, forward=True):
@@ -584,11 +809,9 @@ class Engine:
         """Wired to the "Scale" button (a plain toggle now, not a hold).
         Enterable only with a specific track selected. Scale mode shows
         Key/Scale for *the* selected track, which means nothing in Main
-        mode (many tracks) or while the mod lane overlay (a different
-        track-scoped overlay) is open. Turning it off works in any mode,
-        the same as the mod lane's own toggle-closes-if-already-open
-        behavior."""
-        if not self.scale_mode_active and (self.main_selected or self.mod_lane_active):
+        mode (many tracks) or for a Mod track (no pitch concept)."""
+        selected = self.selected()
+        if not self.scale_mode_active and (self.main_selected or (selected and selected["kind"] == "mod")):
             return
         self.scale_mode_active = not self.scale_mode_active
         if self.scale_mode_active:
@@ -606,7 +829,7 @@ class Engine:
         gating as Scale mode, and exclusive with it for the same reason:
         both use the top-of-screen label/value row for something other
         than Track mode's normal 8-parameter row."""
-        if not self.length_view_active and (self.main_selected or self.mod_lane_active):
+        if not self.length_view_active and self.main_selected:
             return
         self.length_view_active = not self.length_view_active
         if self.length_view_active:
@@ -673,7 +896,7 @@ class Engine:
         encoder. Same step_idx=None-means-every-step convention as
         nudge_param: a held pad targets just that step, nothing held
         resets every step on the track."""
-        if track_idx is None or param in NOOP_PARAMS:
+        if track_idx is None:
             return
         t = self.tracks[track_idx]
         if param == "channel":
@@ -709,9 +932,8 @@ class Engine:
             # not sign-reduced like "repeat" — a fast turn can still move
             # several units in one call, just not on every tiny wiggle.
             step["note"] = max(-127, min(127, step["note"] + delta))
-        # "channel" (track-level, see set_channel) and "mod lane"
-        # (status-only) never reach here: run.py routes them elsewhere or
-        # no-ops them before calling nudge_param.
+        # "channel" (track-level, see set_channel) never reaches here:
+        # run.py routes it elsewhere before calling nudge_param.
 
     # -- octave / transpose -----------------------------------------------------
 
@@ -739,21 +961,17 @@ class Engine:
                 if t["_ext_acc"] >= ticks_per_step:
                     t["_ext_acc"] = 0
                     self._advance_step(idx, now)
-
-                t["_mod_ext_acc"] += 1
-                mod_beats_per_step = DIVISIONS.get(t["mod_div"], DIVISIONS[DEFAULT_DIV])
-                mod_ticks_per_step = max(1, round(TICKS_PER_QUARTER * mod_beats_per_step))
-                if t["_mod_ext_acc"] >= mod_ticks_per_step:
-                    t["_mod_ext_acc"] = 0
-                    self._advance_mod_step(idx)
+                if t["kind"] == "mod" and t["mod_mode"] == "lfo" and t["mod_dest_type"] == "external":
+                    self._emit_mod_output(idx, now)
         elif first_byte == 0xFA:    # Start
             self.play_start = now
             self.playing = True
             for t in self.tracks:
                 t["_current_step"] = -1
                 t["_ext_acc"] = 0
-                t["_mod_current_step"] = -1
-                t["_mod_ext_acc"] = 0
+                t["_mod_seq_value"] = 0
+                t["_lfo_anchor"] = now
+                t["_mod_last_sent"] = None
         elif first_byte == 0xFB:    # Continue
             self.playing = True
         elif first_byte == 0xFC:    # Stop
@@ -789,51 +1007,135 @@ class Engine:
             if step_idx != t["_current_step"]:
                 t["_current_step"] = step_idx
                 self._trigger_step(idx, step_idx, now)
-
-            mod_dur = self.mod_step_duration(t, bpm)
-            mod_idx = int(elapsed / mod_dur) % t["mod_length"]
-            if mod_idx != t["_mod_current_step"]:
-                t["_mod_current_step"] = mod_idx
-                self._trigger_mod_step(idx, mod_idx)
+            if t["kind"] == "mod" and t["mod_mode"] == "lfo" and t["mod_dest_type"] == "external":
+                self._emit_mod_output(idx, now)
 
     def _advance_step(self, track_idx, now):
         t = self.tracks[track_idx]
         t["_current_step"] = (t["_current_step"] + 1) % t["length"]
         self._trigger_step(track_idx, t["_current_step"], now)
 
-    def _advance_mod_step(self, track_idx):
-        t = self.tracks[track_idx]
-        t["_mod_current_step"] = (t["_mod_current_step"] + 1) % t["mod_length"]
-        self._trigger_mod_step(track_idx, t["_mod_current_step"])
+    # -- mod track output -----------------------------------------------------
 
-    def _trigger_mod_step(self, track_idx, step_idx):
+    def _mod_output_raw(self, track_idx, now):
+        """This Mod track's current output value, 0-127, before mod_amount
+        scaling — the raw sequenced value ("seq" mode) or the raw
+        waveform sample ("lfo" mode). Read both by _emit_mod_output (the
+        push path, external dest) and by _apply_mod (the pull path,
+        internal dest)."""
         t = self.tracks[track_idx]
-        if not self.track_audible(t):
+        if t["mod_mode"] == "lfo":
+            bpm = self.doc["pattern"]["bpm"]
+            period = max(0.01, self.step_duration(t, bpm))
+            phase = ((now - t["_lfo_anchor"]) / period) % 1.0
+            return round(self._lfo_waveform(t["mod_lfo_shape"], phase) * 127)
+        return t["_mod_seq_value"]
+
+    @staticmethod
+    def _lfo_waveform(shape, phase):
+        """phase is 0..1 (one full cycle). Returns 0..1."""
+        if shape == "sine":
+            return (math.sin(phase * 2 * math.pi) + 1) / 2
+        if shape == "saw":
+            return phase
+        if shape == "square":
+            return 1.0 if phase < 0.5 else 0.0
+        return 1.0 - abs(phase * 2 - 1)  # triangle
+
+    def _effective_mod_amount(self, track_idx, now):
+        """This track's own mod_amount (0-100), possibly offset by
+        another Mod track targeting its Amount internally. Deliberately
+        does not recurse further than this one level — _apply_mod's own
+        loop always uses a modulator's raw mod_amount, never this — so a
+        mutual amount<->amount routing between two Mod tracks cannot
+        loop forever."""
+        t = self.tracks[track_idx]
+        return self._apply_mod(track_idx, "amount", t["mod_amount"], now)
+
+    def _emit_mod_output(self, track_idx, now):
+        """Sends the current output as a CC, if this track's dest is
+        external and the scaled value actually changed since the last
+        send — a "seq" track only changes on its own "on" steps, but an
+        "lfo" track is called every tick, and re-sending an unchanged CC
+        every frame would flood the host for nothing."""
+        t = self.tracks[track_idx]
+        if t["mod_dest_type"] != "external":
             return
-        value = t["mod_steps"][step_idx]
-        if value > 0:
-            self._send_cc(t["channel"], t["mod_cc"], value)
+        raw = self._mod_output_raw(track_idx, now)
+        amount = self._effective_mod_amount(track_idx, now)
+        scaled = max(0, min(127, round(raw * (amount / 100.0))))
+        if scaled == t["_mod_last_sent"]:
+            return
+        t["_mod_last_sent"] = scaled
+        self._send_cc(t["channel"], t["mod_cc"], scaled)
+
+    def _trigger_mod_track_step(self, track_idx, step, now):
+        """Unlike a MIDI track, this runs on *every* step, on or off —
+        an "off" step needs to actively zero the seq output, not just be
+        skipped, or the last "on" step's value would keep applying
+        forever (see plans/2026-09-02-mod-track-redesign.md's
+        follow-up)."""
+        t = self.tracks[track_idx]
+        if t["mod_mode"] == "lfo":
+            if step["on"]:
+                t["_lfo_anchor"] = now  # retrigger: restart the waveform's phase here
+        else:
+            t["_mod_seq_value"] = step["vel"] if step["on"] else 0
+        self._emit_mod_output(track_idx, now)
+
+    def _apply_mod(self, dest_track_idx, param_name, base_value, now):
+        """Offsets base_value by every audible internal-dest Mod track
+        routed at (dest_track_idx, param_name), scaled by each one's
+        mod_amount, then clamps to that parameter's valid range. Two Mod
+        tracks routed to the same track+param simply sum. A plain linear
+        scan over self.tracks — fine at MAX_TRACKS=16, no registry
+        needed."""
+        total = base_value
+        for idx, t in enumerate(self.tracks):
+            if t["kind"] != "mod" or not self.track_audible(t):
+                continue
+            if t["mod_dest_type"] != "internal" or t["mod_dest_track"] != dest_track_idx:
+                continue
+            if t["mod_dest_param"] != param_name:
+                continue
+            raw = self._mod_output_raw(idx, now)
+            # Uses the modulator's raw mod_amount, not _effective_mod_amount —
+            # keeps this non-recursive, so two Mod tracks routing Amount at
+            # each other can never loop forever.
+            total += raw * (t["mod_amount"] / 100.0)  # mod_combine == "offset_additive", the only mode so far
+        lo_hi = MOD_PARAM_RANGE.get(param_name)
+        if lo_hi:
+            total = max(lo_hi[0], min(lo_hi[1], total))
+        return total
 
     def _trigger_step(self, track_idx, step_idx, now):
         t = self.tracks[track_idx]
         if not self.track_audible(t):
             return
         step = t["steps"][step_idx]
+
+        if t["kind"] == "mod":
+            # Runs on every step, on or off — see _trigger_mod_track_step.
+            self._trigger_mod_track_step(track_idx, step, now)
+            return
+
         if not step["on"]:
             return
 
         bpm = self.doc["pattern"]["bpm"]
         step_dur = self.step_duration(t, bpm)
 
+        prob = self._apply_mod(track_idx, "probability", step["prob"], now)
         import random
-        if random.randint(1, 100) > step["prob"]:
+        if random.randint(1, 100) > prob:
             return
 
-        note = self.resolve_note(t, step["note"])
-        vel = step["vel"] + (20 if step["accent"] else 0)
-        vel = max(1, min(127, vel))
-        gate_frac = step["gate"] / 100.0
-        offset_frac = step["offset"] / 100.0
+        note_offset = self._apply_mod(track_idx, "pitch", step["note"], now)
+        note = self.resolve_note(t, round(note_offset))
+        vel = self._apply_mod(track_idx, "velocity", step["vel"], now) + (20 if step["accent"] else 0)
+        vel = max(1, min(127, round(vel)))
+        gate_frac = self._apply_mod(track_idx, "gate", step["gate"], now) / 100.0
+        offset_frac = self._apply_mod(track_idx, "offset", step["offset"], now) / 100.0
         repeats = max(1, step["repeat"])
 
         for r in range(repeats):

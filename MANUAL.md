@@ -52,38 +52,31 @@ Cols (left→right):  track 1 … track 8   (the currently visible window)
 
 GridSeq has exactly one specific track selected, or **Main mode**
 active, never both. This changes the meaning of the 8 encoders and the
-area above the pads.
+area above the pads. The 8 columns are always for tracks of one kind at
+a time — MIDI tracks or Mod tracks, never mixed. See "Tracks vs Mod
+tracks" below for how to switch which kind you are looking at, and for
+what a Mod track's own columns show.
 
-**Track mode (a specific track selected, the default):**
+**Track mode, a MIDI track selected (the default):**
 - The 8 columns are **parameters** of that one track: column 1 =
   Velocity, column 2 = Gate, column 3 = Repeat, column 4 = Probability,
   column 5 = Offset, column 6 = Pitch. Pitch shows note names, for
   example "C#3", instead of a plain semitone number. See "Pitch and
   scale" below. Column 7 = **MIDI Channel**, the MIDI output channel of
-  the track (1-16, independent per track). Column 8 = **Mod**. Mod
-  renders as a small colored button, the same height as the old header
-  row, with a "**>**" mark that hints at another page behind it. Mod has
-  no single label/value pair, because no one number can show the state
-  of a whole mod lane.
-- **Tap the "Screen top" button directly above the Mod column** to jump
-  straight into the mod-lane editor for that track. See "Mod lane"
-  below. Turning the encoder itself still does nothing. Encoder *N*
-  always edits the parameter of column *N*, for the selected track.
-- All 8 parameters show and edit at once. There is no paging.
+  the track (1-16, independent per track). Column 8 does nothing on a
+  MIDI track.
+- Encoder *N* always edits the parameter of column *N*, for the selected
+  track. All 7 parameters show and edit at once. There is no paging.
 
 **Main mode (press "Select (main)"):**
 - The 8 columns are **tracks** again, the same as the pad grid always
   shows. But now all 8 columns show the *same* parameter. Encoder *N*
   edits the value of that one parameter, for the *N*th visible track.
 - Turn the **jog wheel** to change *which* parameter all 8 columns show
-  and edit: velocity, gate, repeat, probability, offset, pitch, MIDI
-  channel, or mod. The jog wheel cycles the same list that Track mode's
-  8 columns are fixed to. It stops at either end (Velocity, Mod) instead
-  of wrapping around.
-- Mod still renders as a button here, one per visible track, in that
-  track's color. The "Screen top N" button above any column opens the
-  mod lane of *that* track directly, no matter which parameter Main mode
-  currently shows.
+  and edit: velocity, gate, repeat, probability, offset, pitch, or MIDI
+  channel. The jog wheel cycles the same list that Track mode's 7
+  columns are fixed to. It stops at either end (Velocity, MIDI Channel)
+  instead of wrapping around.
 - Use Main mode to compare or adjust the same parameter across every
   track at a glance, for example to balance every track's velocity
   against the others.
@@ -168,9 +161,9 @@ G8.
 track* by one octave. This is a global control, not a per-track one.
 
 **Press "Scale"** to enter **Scale mode**. This mode works only with a
-specific track selected, not in Main mode and not while the mod lane
-overlay is open. The button LED goes fully off, not just dim, when Scale
-mode is not available.
+specific MIDI track selected — not in Main mode, and not with a Mod
+track selected (a Mod track has no pitch concept). The button LED goes
+fully off, not just dim, when Scale mode is not available.
 
 While Scale mode is active, only two columns mean anything:
 - Column 1 = **Key**. Turn it to step the root note of the selected
@@ -237,10 +230,10 @@ exactly. There are not two separate mute/solo visual states. One shared
 "will not sound" look covers both causes.
 
 Mute and solo are a GridSeq-side gate only. A muted or silenced track
-never sends its notes or mod CCs. `Engine.track_audible()` runs at
-trigger time, in `_trigger_step` and `_trigger_mod_step`. There is no
-MIDI "mute message" involved. This is the only way to mute or solo MIDI
-output from GridSeq.
+never sends its notes or its modulation. `Engine.track_audible()` runs
+at trigger time, in `_trigger_step`. There is no MIDI "mute message"
+involved. This is the only way to mute or solo MIDI output from
+GridSeq.
 
 ## Track color picker
 
@@ -253,13 +246,29 @@ clockwise around the edge. The border has 28 pads and GridSeq has 26
 colors, so 2 border pads at the end of the loop stay dark.
 
 Tap any lit border pad to set that color on the selected track,
-immediately. Its pad steps, its Screen-bottom button, and its Screen-top
-Mod button all switch to the new color at once. You can tap a different
-border pad to change your choice, before you release Shift.
+immediately. Its pad steps and its Screen-bottom button both switch to
+the new color at once. You can tap a different border pad to change
+your choice, before you release Shift.
 
 Release **Shift** to exit the picker and return to the normal step grid.
 No other control (mute/solo, step editing, encoders) works while the
 picker is open.
+
+## Deleting a track
+
+Hold **Delete**, then tap a track's **Screen-bottom** button, to delete
+that track — MIDI or Mod, either kind. This is immediate, with no
+confirmation prompt, the same as every other Delete+something GridSeq
+combo. **Undo** reverses it, one level, like any other edit.
+
+Every track after the deleted one shifts down by one slot. Any Mod
+track whose internal destination pointed at the deleted track has that
+destination cleared; one pointed further along shifts down with it, so
+it still points at the same logical track.
+
+GridSeq refuses to delete the last track left in the whole pool — you
+can still empty out one kind entirely (delete every Mod track, for
+example), just not every track of both kinds at once.
 
 ## Tempo
 
@@ -298,60 +307,68 @@ directly. Press one, and that track advances at that rate from then on.
 The button for the selected track's active division **pulses vivid
 green, on and off**, so it is impossible to miss. The rest stay dim.
 
-## Mod lane
+## Tracks vs Mod tracks
 
-Each track has an independent **mod lane**: its own length, its own
-time division, and its own per-step value from 0 to 127. The mod lane is
-fully decoupled from the note lane, with a different length, a different
-speed, and its own steps. Whenever a mod step's value is above 0, it
-fires `send_cc(channel, mod_cc, value)` on its own schedule, whether or
-not the note lane is playing anything at that moment.
+GridSeq has two kinds of track, sharing one track pool: **MIDI tracks**,
+which play notes, and **Mod tracks**, which generate modulation. Both
+work the same way as a step sequencer — their own column, their own
+grid, their own length and time division — GridSeq just plays one
+kind's steps as notes and the other kind's steps as a modulation source.
+A fresh pattern starts with 8 of each. New Mod tracks default to plain
+white, so they read as visually distinct from MIDI tracks at a glance
+(change it any time with the track color picker).
 
-The "Screen top N" row is off by default. It lights up only above an
-actual Mod button, in that track's own color, and stays off everywhere
-else. This is the same "off means nothing here" convention that the
-Screen-bottom row uses.
+Press **Note** (dim white when off, full white when on) to switch which
+kind the 8 columns, the Screen-bottom track-select row, and Page
+Left/Right all browse. This is a view, not a per-track setting — it
+decides which tracks you currently see and select, not what any one
+track is. Pressing **Add** while viewing Mod tracks creates a new Mod
+track; while viewing MIDI tracks, a new MIDI track. Either way, the new
+track is a duplicate of the currently selected track of that same kind,
+the same as before.
 
-**In Main mode**, every column can show this once the jog wheel scrolls
-to Mod (one Mod button per visible track). Press any of them to open the
-mod-lane editor for that track. **In Track mode**, only "Screen top 8"
-ever lights, because it is the one button that sits above the single Mod
-button there. Press it to open the *selected* track's lane.
+**A Mod track's own 8 columns**, in Track mode (a Mod track selected):
 
-Once the editor is open, it works the same way regardless of which mode
-opened it. The Screen top button of the currently open track turns
-**bright red**. Press that same button to close the editor. Press any
-*other* lit button to jump straight to that track's lane, instead of
-closing first.
+1. **Mode**: `SEQ` or `LFO`. Turning this encoder **stops at either
+   end** instead of wrapping around, same as Key/Scale in Scale mode.
+   - `SEQ` plays the track's own step grid as a value lane. An "on" step
+     writes its own value (edit it the same way as a MIDI track's
+     velocity: hold the pad, turn the Amount encoder) as the output for
+     as long as the playhead sits on that step. An "off" step applies no
+     modulation at all — the destination plays at its own unmodulated
+     value, not the last "on" step's value.
+   - `LFO` free-runs a waveform continuously, at a rate tied to the
+     track's own time division (the Scene buttons, same as always). An
+     "on" step **retriggers** it — resets its phase back to the start,
+     right there — and does nothing else. "Off" steps do nothing.
+2. **Amount**: 0-100 depth. Scales the raw output before it reaches its
+   destination.
+3. **Dest**: `EXT` or `INT`. Also stops at either end, same as Mode.
+   - `EXT` sends the output as a MIDI CC, on the track's own MIDI
+     channel.
+   - `INT` offsets a parameter on another track — MIDI **or Mod** — live,
+     every time that track's step fires (a Mod track can modulate
+     another Mod track, just not itself).
+4. Depends on Dest: **CC** (which CC number to send, external) or
+   **Trk** (which track to modulate, internal — any other track, MIDI
+   or Mod).
+5. Depends on Dest, and on the destination track's own kind:
+   **MIDI Channel** (external), **Param** (internal, destination is a
+   MIDI track — velocity, gate, probability, offset, or pitch), or
+   **Param** again (internal, destination is a Mod track — only
+   `Amount`, so one Mod track's depth can drive another's).
+6. **Shape**: the LFO waveform — triangle, sine, saw, or square. Only
+   meaningful in `LFO` mode; shows "-" in `SEQ` mode.
+7. and 8. Reserved, not in v1 yet (retrigger, offset, phase — see "Not
+   in v1 yet" below).
 
-While the mod-lane editor is open, the grid, D-Pad, and Scene buttons of
-GridSeq all change meaning:
+**In Main mode**, viewing Mod tracks, the jog wheel scrolls through
+these same 8 columns instead of the MIDI-track parameter list — one
+column's label/value per visible Mod track, exactly like Main mode
+already works for MIDI tracks.
 
-- **The pad grid** is borrowed. Column *N* becomes the mod lane of the
-  *N*th visible track, the same track-per-column layout as always. Each
-  column becomes a **bar graph**. Tap a row to set that track's mod
-  value, at the current cursor step, to one of 8 buckets: 0, 18, 36, 54,
-  73, 91, 109, or 127. The bottom row is the lowest bucket, and the top
-  row is the highest. The pads then redraw with rows 0 through that
-  bucket lit, in the track's color, so a taller bar means a louder
-  value. A track whose mod lane is shorter than the current cursor step
-  shows an entirely dark column, with nothing to edit there.
-- **D-Pad up** and **D-Pad down** move a single, shared **cursor**
-  through the mod steps, one step at a time, not by pages. Each column's
-  label carries the prefix "S*N*" (for example "S3 1/16"), for the
-  current cursor step *N*, because there is no header left to show it
-  elsewhere. The D-Pad LEDs show whether there is room to move further
-  up or down (dim) or not (off).
-- **The Scene buttons** (`1/4` to `1/32t`) set the mod division of the
-  *selected* track, instead of its note division. The active one pulses
-  the same way the note-division picker does.
-- Track mode, Main mode, the 8 encoders, and the jog wheel all do
-  nothing while mod-lane mode is active. Mod-lane mode is a third mode,
-  exclusive of the other two, and it takes over the same surface.
-
-Mod lane length has no surface control yet, in v1. Every track starts
-with an 8-step mod lane, at the same default division as its note lane.
-You can change each one independently, once you are editing it.
+Two or more Mod tracks can target the same destination track and
+parameter at once — their offsets simply add together.
 
 ## Growing beyond 8 tracks — and why Page Left/Right looked broken
 
@@ -406,8 +423,9 @@ D-Pad page. The other 7 encoders go blank while this view is open.
 Encoder 1 has the same throttled-turn feel as Key and Scale in Scale
 mode: a deliberate turn is needed per step change, not a small wiggle.
 Clip View is exclusive with Scale mode, so opening either one closes the
-other. Clip View is not available in Main mode, or while the mod lane is
-open, the same gating that Scale mode uses.
+other. Clip View is not available in Main mode. Unlike Scale mode, it
+works for a selected Mod track too — a Mod track has its own length,
+the same as a MIDI track.
 
 New tracks and patterns still default to 8 steps. Only this knob, or
 Shift + D-Pad, changes the length after that.
@@ -423,7 +441,7 @@ can see at a glance whether pressing it will do anything.
 
 Hold **Delete**, then touch a screen encoder with a light touch, not a
 turn or a click. This uses the same capacitive sensor that already fires
-on every normal turn. See "Mod lane" above for why that matters.
+on every normal turn.
 
 This action resets the current parameter of that encoder to its default
 value: 100 for Velocity, 50 for Gate, 1 for Repeat, 100 for Probability,
@@ -431,9 +449,8 @@ value: 100 for Velocity, 50 for Gate, 1 for Repeat, 100 for Probability,
 step pad held, only that step resets. With no pad held, every step on
 the track resets.
 
-This action has no effect on Mod, because Mod is a status page here, not
-an editable value. It also has no effect while Scale mode or the mod
-lane overlay is active.
+This action has no effect on a Mod track's own columns yet, and no
+effect while Scale mode is active.
 
 ## Saving and loading sequences
 
@@ -456,8 +473,7 @@ you want to keep it.
 
 Press **Set** again, with nothing else pressed, to close the list with
 no change. While the list is open, the pad grid, the other 7 encoders,
-and Tempo all do nothing. This is the same "one overlay owns everything"
-exclusivity that the mod-lane overlay uses.
+and Tempo all do nothing — the browser owns the whole surface.
 
 Sequence files live in this module's own `sequences/` folder, as plain
 JSON, one file per sequence. This is a separate mechanism from the
@@ -468,13 +484,12 @@ which stays off either way.
 
 | State | Meaning |
 |---|---|
-| **Off (black)** | No function here right now (Page Right at the last page, every "Screen bottom" button except the selected track's, or all of them in Main mode) |
+| **Off (black)** | No function here right now (Page Right at the last page, every "Screen bottom" button except the selected track's, all of them in Main mode, or every "Screen top" button — unmapped, see "Not in v1 yet") |
 | **Dim white** | Has a function, currently inactive or available |
-| **Full white** | Active: held down, toggled on, or "currently in effect" (selected track's division, Undo when an undo is available, Main mode on) |
-| **Track color** | The selected track's own "Screen bottom" button. This matches its pad LEDs and on-screen label. Off entirely while Main mode is active. Also every "Screen top" button that currently sits above an actual Mod button, in that track's color. Off everywhere else on that row. |
+| **Full white** | Active: held down, toggled on, or "currently in effect" (selected track's division, Undo when an undo is available, Main mode on, Note on while viewing Mod tracks) |
+| **Track color** | The selected track's own "Screen bottom" button. This matches its pad LEDs and on-screen label. Off entirely while Main mode is active. |
 | **Green** | Play, while the sequencer runs |
 | **Pulsing green/off** | The active time-division button of the selected track |
-| **Bright red** | The open track's "Screen top" button, in the mod lane. Press it to close the overlay. |
 
 ## Persistence
 
@@ -487,12 +502,11 @@ automatically on close, and reloads it automatically on the next start.
 
 ## Not in v1 yet
 
-- A real visualization for the status page of the Mod column. Today it
-  is a plain colored button. How to show a whole lane's worth of values
-  in that space is still an open question.
-- A surface control for mod-lane length. It is fixed at 8 steps for now,
-  the same way note-lane length was, before its own control shipped.
-- A per-track mod CC number. It is fixed to CC1 for every track.
+- Retrigger, offset, and phase controls for Mod tracks (columns 7-8 of
+  a Mod track's page are reserved for these).
+- Delete + touch reset-to-default for a Mod track's own columns.
+- A replacement job for the "Screen top" buttons — unmapped since the
+  old mod-lane overlay (their only past job) was removed.
 - Pattern slots, or song chaining (v3).
 
 See the project README for the full v1 to v3 roadmap.

@@ -24,6 +24,12 @@ Guidance for Claude Code in this repository.
 > up grammar, it does not license longer comments. Apply this to new
 > prose as you write it, rather than as a separate pass.
 
+## Push family context
+
+Shared facts for all Push repos (repo map, git identity, `core/` pinning, cross-repo hardware facts):
+
+@~/.claude/push-family.md
+
 ## Project
 
 GridSeq is a step sequencer module for `push-tethered-app` (a

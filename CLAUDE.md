@@ -111,14 +111,12 @@ Quick facts that have bitten this repo before:
 
 ## Colors
 
-`palette.json` is generated from `push-tethered-app`'s
-`core/push3.Palette` via `go run ./cmd/genpalette` (run from *that*
-repo, then copy the output into this repo's root — see that repo's
-`docs/guides/writing-a-process-module.md#colors`). It resolves every
-0-127 hardware index to `{index, name, r, g, b, a}`, both `byName` and
-`byIndex`. Regenerate only if that repo's `core/push3.Palette` itself
-changes (rare, it's a fixed SysEx-sourced table) — this file is checked
-in, not rebuilt on every run.
+`palette.json` holds all 128 hardware LED entries as `{index, name, r, g, b, a}`, both
+`byName` and `byIndex`. The RGB values come from the SysEx-verified table in
+`ableton-push-hack`'s `docs/push3-led-colors.md`. Earlier versions came from
+`push-tethered-app`'s `cmd/genpalette`, which only had the 90 named entries. That gave a
+wrong screen color for 38 indices (see the addendum in that doc). Regenerate only if that
+table changes. The file is checked in, not rebuilt on every run.
 
 - **Pad and button LEDs** (`set_pad`/`set_button`) want a raw palette
   **index** (0-127), never RGB.
